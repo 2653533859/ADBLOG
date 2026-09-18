@@ -1,0 +1,92 @@
+{
+  "name": "adblog-studio",
+  "version": "0.0.1",
+  "description": "Android Device LAN Management & Real-time Logcat/Scrcpy Workbench",
+  "author": "ADBlog Studio",
+  "main": "dist-electron/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "pack": "npm run build && electron-builder --win dir",
+    "dist": "npm run build && electron-builder --win nsis",
+    "portable": "npm run build && electron-builder --win portable",
+    "start": "electron .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "@yume-chan/adb": "^2.5.1",
+    "@yume-chan/adb-scrcpy": "^2.3.2",
+    "@yume-chan/adb-server-node-tcp": "^2.5.2",
+    "@yume-chan/scrcpy": "^2.3.0",
+    "@yume-chan/scrcpy-decoder-webcodecs": "^2.5.3",
+    "@yume-chan/stream-extra": "^2.5.3",
+    "echarts": "^6.1.0",
+    "lucide-vue-next": "^0.468.0",
+    "pinia": "^2.2.8",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.0.12",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.16",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6",
+    "vue-tsc": "^2.1.10"
+  },
+  "build": {
+    "appId": "com.adblog.studio",
+    "productName": "ADBlog Studio",
+    "copyright": "Copyright © 2026 ADBLog Studio",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "public"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "tools/scrcpy",
+        "to": "tools/scrcpy",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "public/app-icon.ico",
+        "to": "app-icon.ico"
+      }
+    ],
+    "win": {
+      "icon": "public/app-icon.ico",
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "ADBlog-Studio-V${version}-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ADBlog Studio",
+      "installerIcon": "public/app-icon.ico",
+      "uninstallerIcon": "public/app-icon.ico"
+    },
+    "portable": {
+      "artifactName": "ADBlog-Studio-V${version}-Portable.${ext}"
+    }
+  }
+}
