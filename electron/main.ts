@@ -117,6 +117,7 @@ ipcMain.handle('adb:scanLan', (_e, port?: number, subnet?: string) => discoveryS
 ipcMain.handle('adb:getDeviceInfo', (_e, serial: string) => deviceInfoService.getDeviceInfo(serial))
 ipcMain.handle('adb:getInstalledApps', (_e, serial: string) => appService.getInstalledApps(serial))
 ipcMain.handle('adb:getAppPid', (_e, serial: string, pkg: string) => appService.getAppPid(serial, pkg))
+ipcMain.handle('adb:getAppPids', (_e, serial: string, pkg: string) => appService.getAppPids(serial, pkg))
 ipcMain.handle('adb:installApk', (_e, serial: string, localPath: string) => appService.installApk(serial, localPath))
 
 // Logcat

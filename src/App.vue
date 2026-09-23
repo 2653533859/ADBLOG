@@ -28,7 +28,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import TopBar from './components/layout/TopBar.vue'
 import SideNav from './components/layout/SideNav.vue'
 import StatusBar from './components/layout/StatusBar.vue'
@@ -48,6 +48,8 @@ const activeTab = ref('logcat')
 const appIconUrl = './app-icon.png'
 const deviceStore = useDeviceStore()
 const logcatStore = useLogcatStore()
+let pidRefreshTimer: ReturnType<typeof setInterval> | null = null
+let pidRefreshInFlight = false
 
 const currentViewComponent = computed(() => {
   switch (activeTab.value) {
@@ -63,13 +65,41 @@ const currentViewComponent = computed(() => {
 })
 
 watch(() => deviceStore.selectedSerial, (serial) => {
-  logcatStore.setTargetPid(null)
-  if (serial) logcatStore.startStream(serial)
-  else logcatStore.stopStream()
+  logcatStore.setTargetPids(null)
+  void (serial ? logcatStore.startStream(serial) : logcatStore.stopStream())
 }, { flush: 'sync' })
+
+watch(() => deviceStore.selectedPackage, (pkg) => {
+  if (pidRefreshTimer) {
+    clearInterval(pidRefreshTimer)
+    pidRefreshTimer = null
+  }
+  // A new app selection starts a new PID history. Do not carry the previous
+  // app's PIDs across the short gap before the new lookup completes.
+  logcatStore.setTargetPids(pkg ? [] : null)
+  if (!pkg) return
+
+  pidRefreshTimer = setInterval(async () => {
+    if (pidRefreshInFlight) return
+    pidRefreshInFlight = true
+    try {
+      await deviceStore.refreshSelectedAppPids()
+    } finally {
+      pidRefreshInFlight = false
+    }
+  }, 1500)
+}, { flush: 'sync' })
+
+watch(() => deviceStore.selectedPids, (pids) => {
+  if (deviceStore.selectedPackage) logcatStore.retainTargetPids(pids)
+})
 
 onMounted(async () => {
   await deviceStore.fetchDevices()
 
+})
+
+onBeforeUnmount(() => {
+  if (pidRefreshTimer) clearInterval(pidRefreshTimer)
 })
 </script>

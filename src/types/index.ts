@@ -56,7 +56,8 @@ export interface LogcatEntry {
 }
 
 export interface LogcatFilterOptions {
-  targetPid: number | null;
+  targetPids: number[] | null;
+  pid: number | null;
   minLevel: LogLevel;
   keyword: string;
   isRegex: boolean;

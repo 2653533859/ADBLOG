@@ -23,6 +23,7 @@ export interface IElectronAPI {
   getDeviceInfo: (serial: string) => Promise<DeviceDetailInfo>
   getInstalledApps: (serial: string) => Promise<AppItem[]>
   getAppPid: (serial: string, pkg: string) => Promise<number | null>
+  getAppPids: (serial: string, pkg: string) => Promise<number[]>
   installApk: (serial: string, localPath: string) => Promise<ApkInstallResult>
 
   // Logcat
@@ -91,6 +92,7 @@ const api: IElectronAPI = {
   getDeviceInfo: (serial: string) => ipcRenderer.invoke('adb:getDeviceInfo', serial),
   getInstalledApps: (serial: string) => ipcRenderer.invoke('adb:getInstalledApps', serial),
   getAppPid: (serial: string, pkg: string) => ipcRenderer.invoke('adb:getAppPid', serial, pkg),
+  getAppPids: (serial: string, pkg: string) => ipcRenderer.invoke('adb:getAppPids', serial, pkg),
   installApk: (serial: string, localPath: string) => ipcRenderer.invoke('adb:installApk', serial, localPath),
 
   startLogcat: (serial: string) => ipcRenderer.invoke('logcat:start', serial),

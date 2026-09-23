@@ -58,6 +58,7 @@ async function main() {
   const { AppService } = load('electron/services/app-service.ts', {
     './adb-service': {adbService: {exec: async (args, timeout) => {
       installCalls.push({args,timeout})
+      if (args.includes('ps')) return 'PID NAME\n42 com.example.app\n43 com.example.app:worker\n44 com.other.app\n42 com.example.app'
       if (installFailure) throw new Error('INSTALL_FAILED_VERSION_DOWNGRADE')
       return 'Performing Streamed Install\nSuccess'
     }}},
@@ -65,12 +66,14 @@ async function main() {
     'node:path': require('node:path')
   })
   const apps = new AppService()
+  assert.deepEqual(Array.from(await apps.getAppPids('A','com.example.app')),[42,43])
+  assert.equal(await apps.getAppPid('A','com.example.app'),42)
   assert.equal((await apps.installApk('A','C:/tmp/not-an-apk.zip')).success,false)
-  assert.equal(installCalls.length,0)
+  assert.equal(installCalls.length,2)
   const installed = await apps.installApk('A','C:/tmp/My App.apk')
   assert.equal(installed.success,true)
-  assert.deepEqual(Array.from(installCalls[0].args),['-s','A','install','-r','-t','C:/tmp/My App.apk'])
-  assert.equal(installCalls[0].timeout,5 * 60 * 1000)
+  assert.deepEqual(Array.from(installCalls[2].args),['-s','A','install','-r','-t','C:/tmp/My App.apk'])
+  assert.equal(installCalls[2].timeout,5 * 60 * 1000)
   installFailure = true
   const failedInstall = await apps.installApk('A','C:/tmp/My App.apk')
   assert.equal(failedInstall.success,false)
@@ -94,12 +97,45 @@ async function main() {
   assert.equal(children.length,2)
   console.log('PASS terminal CRCRLF parsing, replay, device switch and resize isolation')
 
+  const filterUtil = load('src/utils/logcat-filter.ts')
+  const sampleEntries = [
+    {pid:20,level:'I',tag:'Network',message:'Request failed'},
+    {pid:20,level:'D',tag:'chatty',message:'Request retry'},
+    {pid:30,level:'E',tag:'Network',message:'Request failed'}
+  ]
+  const filterOptions = {targetPids:[20],pid:null,minLevel:'I',keyword:'request',isRegex:false,
+    isCaseSensitive:false,tag:'net',excludeTags:['chatty']}
+  let filterResult = filterUtil.filterLogcatEntries(sampleEntries,filterOptions)
+  assert.equal(filterResult.scopeCount,2)
+  assert.deepEqual(Array.from(filterResult.entries, entry => entry.pid),[20])
+  filterResult = filterUtil.filterLogcatEntries(sampleEntries,{...filterOptions,keyword:'[',isRegex:true})
+  assert.equal(filterResult.entries.length,0)
+  filterResult = filterUtil.filterLogcatEntries(sampleEntries,{...filterOptions,pid:30})
+  assert.equal(filterResult.scopeCount,2)
+  assert.equal(filterResult.entries.length,0)
+  console.log('PASS shared logcat scope counts, advanced filters and invalid regex')
+
   const streams = []
+  let restartCollector
   const { LogcatService } = load('electron/services/logcat-service.ts', {
     fs: {createWriteStream: () => { const s = new EventEmitter(); s.end = () => {}; streams.push(s); return s }},
-    './adb-service': {adbService:terminalAdb}
-  })
+    './adb-service': {adbService:terminalAdb},
+    '../../src/utils/logcat-filter': filterUtil
+  }, {setTimeout: fn => {restartCollector = fn; return 99}, clearTimeout: () => {}})
   const logs = new LogcatService(); logs.start('A',win)
+  assert.deepEqual(Array.from(children.at(-1).args),['-s','A','logcat','-v','threadtime','-T','1'])
+  const lastLine = '09-22 10:00:00.001    20    21 I Second: visible\n'
+  children.at(-1).c.stdout.emit('data',Buffer.from(`09-22 10:00:00.000    10    11 I First: hidden\n${lastLine}`))
+  assert.deepEqual(Array.from(logs.getBufferedLogs({targetPids:[20],pid:null,minLevel:'V',keyword:'',isRegex:false,isCaseSensitive:false,tag:'',excludeTags:[]})).map(item => item.pid),[20])
+  children.at(-1).c.stdout.emit('data',Buffer.from('09-22 10:00:00.002    20    21 I Broken: partial'))
+  const oldCollector = children.at(-1).c
+  children.at(-1).c.emit('exit')
+  assert.equal(typeof restartCollector,'function')
+  restartCollector()
+  assert.equal(children.at(-1).args[2],'logcat')
+  oldCollector.stdout.emit('data',Buffer.from(' line\n'))
+  children.at(-1).c.stdout.emit('data',Buffer.from(`${lastLine}09-22 10:00:00.003    20    21 I Third: after restart\n`))
+  assert.deepEqual(Array.from(logs.getBufferedLogs(), entry => entry.message),['hidden','visible','after restart'])
   let resolved = false
   const pending = logs.startRecording('test.log').then(ok => {resolved = true; return ok})
   await Promise.resolve(); assert.equal(resolved,false)
@@ -107,7 +143,7 @@ async function main() {
   const opened = logs.startRecording('test.log'); streams[1].emit('open'); assert.equal(await opened,true)
   streams[1].emit('error',Error('disk full')); assert.equal(logs.isRecording,false)
   logs.stop()
-  console.log('PASS recording open and asynchronous failure handling')
+  console.log('PASS logcat restart deduplicates replay, drops stale output and recording failures')
 
   const timers = [], sent = [], collectors = []
   const { PerfService } = load('electron/services/perf-service.ts', {'./adb-service': {adbService: {}}}, {
@@ -126,7 +162,8 @@ async function main() {
   perf.stop()
   console.log('PASS monitoring restart rejects stale samples')
 
-  let scrcpyInit, pushed = false, closed = false
+  let scrcpyInit, pushed = false, closed = false, startFactory = () => Promise.resolve(mockClient)
+  const scrcpyTimers = []
   const mockClient = {
     videoStream: Promise.resolve({
       metadata: {codec: 1748121140, width: 720, height: 1280},
@@ -150,7 +187,7 @@ async function main() {
       AdbScrcpyOptionsLatest: class {constructor(init) {scrcpyInit = init}},
       AdbScrcpyClient: class {
         static pushServer = async () => {pushed = true}
-        static start = async () => mockClient
+        static start = () => startFactory()
       }
     },
     '@yume-chan/stream-extra': {PushReadableStream: class {}},
@@ -162,6 +199,9 @@ async function main() {
       ScrcpyPointerId: {Finger:-2n}
     },
     './adb-service': {adbService:{adbPath:'mock-adb'}}
+  }, {
+    setTimeout: fn => {scrcpyTimers.push(fn); return scrcpyTimers.length},
+    clearTimeout: () => {}
   })
   const scrcpy = new ScrcpyService()
   const result = await scrcpy.startStream('device:5555',{maxSize:1280,maxFps:30,bitRate:6000000,stayAwake:true,turnScreenOff:false},win)
@@ -176,8 +216,76 @@ async function main() {
   assert.equal(failedResult.success,false); assert.equal(closed,true)
   console.log('PASS embedded scrcpy options, lifecycle and failed-start cleanup')
 
+  let releaseLateClient, lateClosed = false, timedOutStarts = 0
+  startFactory = () => {timedOutStarts += 1; return new Promise(resolve => {releaseLateClient = resolve})}
+  const timeoutScrcpy = new ScrcpyService()
+  const priorScrcpyTimers = scrcpyTimers.length
+  const timeoutResult = timeoutScrcpy.startStream('device:5555',{maxSize:1280,maxFps:30,bitRate:6000000,stayAwake:true,turnScreenOff:false},win)
+  for (let i = 0; i < 10 && scrcpyTimers.length === priorScrcpyTimers; i++) await new Promise(setImmediate)
+  assert.equal(scrcpyTimers.length,priorScrcpyTimers + 1)
+  const startupTimer = scrcpyTimers.at(-1)
+  assert.equal(typeof startupTimer,'function')
+  startupTimer()
+  assert.equal((await timeoutResult).success,false)
+  assert.equal(timedOutStarts,1)
+  releaseLateClient({close: async () => {lateClosed = true}})
+  await new Promise(setImmediate)
+  assert.equal(lateClosed,true)
+  console.log('PASS timed-out scrcpy startup closes late client without an overlapping retry')
+
   const {createPinia,setActivePinia} = require('pinia')
   setActivePinia(createPinia())
+  let releaseLogcatStop, releaseFirstLogcatStart
+  let logcatStarts = 0
+  let logcatStops = 0
+  const logcatListeners = new Set()
+  const startupEntry = {pid:42,tid:42,level:'I',tag:'Startup',message:'first batch'}
+  const logcatApi = {
+    stopLogcat: () => {
+      logcatStops += 1
+      if (logcatStops === 1) return new Promise(resolve => {releaseLogcatStop = resolve})
+      return Promise.resolve()
+    },
+    startLogcat: serial => {
+      logcatStarts += 1
+      for (const listener of logcatListeners) listener([{...startupEntry,message:serial}])
+      if (serial === 'A') return new Promise(resolve => {releaseFirstLogcatStart = resolve})
+      return Promise.resolve()
+    },
+    onRecordingError: () => () => {},
+    onLogcatBatch: listener => {logcatListeners.add(listener); return () => logcatListeners.delete(listener)}
+  }
+  const {useLogcatStore} = load('src/stores/logcat.ts',{'../utils/logcat-filter':filterUtil}, {
+    window:{electronAPI:logcatApi}, setInterval: () => 1, clearInterval: () => {}
+  })
+  const logcatStore = useLogcatStore()
+  const startingLogcat = logcatStore.startStream('A')
+  await Promise.resolve()
+  assert.equal(logcatStarts,0)
+  releaseLogcatStop()
+  await new Promise(setImmediate)
+  assert.equal(logcatStore.entries[0].message,'A')
+  const switchingLogcat = logcatStore.startStream('B')
+  assert.equal(logcatListeners.size,0)
+  assert.equal(logcatStarts,1)
+  releaseFirstLogcatStart()
+  await startingLogcat
+  await switchingLogcat
+  assert.equal(logcatStarts,2)
+  assert.equal(logcatListeners.size,1)
+  assert.deepEqual(Array.from(logcatStore.entries, entry => entry.message),['B'])
+  logcatStore.setTargetPids([])
+  logcatStore.retainTargetPids([42])
+  logcatStore.entries.push({...startupEntry,pid:77,message:'after restart'})
+  logcatStore.retainTargetPids([77])
+  logcatStore.retainTargetPids([])
+  assert.deepEqual(Array.from(logcatStore.filteredEntries, entry => entry.message),['B','after restart'])
+  logcatStore.setTargetPids([])
+  assert.equal(logcatStore.filteredEntries.length,0)
+  await logcatStore.stopStream()
+  assert.equal(logcatListeners.size,0)
+  console.log('PASS logcat startup, device changes and app PID history')
+
   let callback, written
   const api = {startPerf: () => {},stopPerf: () => {},onPerfSample: fn => {callback=fn;return () => {}},
     showSaveDialog: async () => 'chosen/report.csv',writeTextFile: async (path,content) => {written={path,content}}}
@@ -198,6 +306,7 @@ async function main() {
   assert.equal(typeof exposedApi.startLogcat,'function')
   assert.equal(typeof exposedApi.installApk,'function')
   assert.equal(typeof exposedApi.showOpenDialogApk,'function')
+  assert.equal(typeof exposedApi.getAppPids,'function')
   assert.equal(exposedApi.getPathForFile({mockPath:'C:/tmp/app.apk'}),'C:/tmp/app.apk')
   console.log('PASS built preload executes with sandbox-style CommonJS loader')
 

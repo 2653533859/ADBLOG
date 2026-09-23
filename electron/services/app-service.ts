@@ -59,18 +59,29 @@ export class AppService {
     }
   }
 
-  public async getAppPid(serial: string, packageName: string): Promise<number | null> {
+  public async getAppPids(serial: string, packageName: string): Promise<number[]> {
     try {
-      const out = await adbService.exec(['-s', serial, 'shell', 'pidof', packageName], 3000)
-      const pids = out.trim().split(/\s+/).filter(Boolean)
-      if (pids.length > 0) {
-        const parsed = parseInt(pids[0], 10)
-        return Number.isNaN(parsed) ? null : parsed
-      }
-      return null
+      const out = await adbService.exec(['-s', serial, 'shell', 'ps', '-A', '-o', 'PID,NAME'], 3000)
+      const pids = out.split(/\r?\n/).flatMap(line => {
+        const match = line.trim().match(/^(\d+)\s+(.+)$/)
+        if (!match || (match[2] !== packageName && !match[2].startsWith(`${packageName}:`))) return []
+        return [Number.parseInt(match[1], 10)]
+      })
+      return [...new Set(pids.filter(pid => Number.isInteger(pid) && pid > 0))]
     } catch {
-      return null
+      try {
+        const out = await adbService.exec(['-s', serial, 'shell', 'pidof', packageName], 3000)
+        return [...new Set(out.trim().split(/\s+/)
+          .map(value => Number.parseInt(value, 10))
+          .filter(pid => Number.isInteger(pid) && pid > 0))]
+      } catch {
+        return []
+      }
     }
+  }
+
+  public async getAppPid(serial: string, packageName: string): Promise<number | null> {
+    return (await this.getAppPids(serial, packageName))[0] ?? null
   }
 
   public async installApk(serial: string, localPath: string): Promise<ApkInstallResult> {

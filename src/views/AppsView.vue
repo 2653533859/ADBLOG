@@ -165,11 +165,9 @@
 import { ref, computed } from 'vue'
 import { AlertCircle, LayoutGrid, Search, RefreshCw, Loader2, Package, Box, Check, Upload, X } from 'lucide-vue-next'
 import { useDeviceStore } from '../stores/device'
-import { useLogcatStore } from '../stores/logcat'
 import { AppItem } from '../types'
 
 const deviceStore = useDeviceStore()
-const logcatStore = useLogcatStore()
 
 const searchQuery = ref('')
 const activeFilter = ref<'all' | 'user' | 'system'>('user')
@@ -207,10 +205,8 @@ function refreshApps(): void {
 async function setAsTarget(pkg: string): Promise<void> {
   if (deviceStore.selectedPackage === pkg) {
     await deviceStore.selectApp(null)
-    logcatStore.setTargetPid(null)
   } else {
     await deviceStore.selectApp(pkg)
-    logcatStore.setTargetPid(deviceStore.selectedPid)
   }
 }
 

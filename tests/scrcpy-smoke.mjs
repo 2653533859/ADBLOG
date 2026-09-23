@@ -5,6 +5,9 @@ import { AdbScrcpyClient, AdbScrcpyOptionsLatest } from '@yume-chan/adb-scrcpy'
 import { PushReadableStream } from '@yume-chan/stream-extra'
 
 const serialArg = process.argv[2]
+const maxSize = Number(process.argv[3] || 720)
+const maxFps = Number(process.argv[4] || 30)
+const videoBitRate = Number(process.argv[5] || 2_000_000)
 const server = new AdbServerClient(new AdbServerNodeTcpConnector({ host: '127.0.0.1', port: 5037 }))
 const devices = await server.getDevices(['device'])
 const device = serialArg ? devices.find(item => item.serial === serialArg) : devices[0]
@@ -18,7 +21,7 @@ await AdbScrcpyClient.pushServer(adb, new PushReadableStream(async controller =>
 
 const options = new AdbScrcpyOptionsLatest({
   video: true, audio: false, control: true, videoCodec: 'h264',
-  maxSize: 720, maxFps: 30, videoBitRate: 2_000_000,
+  maxSize, maxFps, videoBitRate,
   sendDeviceMeta: false, sendFrameMeta: true
 })
 const client = await AdbScrcpyClient.start(adb, '/data/local/tmp/adblog-scrcpy-server.jar', options)

@@ -1,7 +1,7 @@
 <template>
   <div class="flex-1 flex flex-col h-full bg-dark-900 overflow-hidden select-none">
     <!-- Toolbar -->
-    <div class="h-14 bg-dark-850 border-b border-dark-700 px-4 flex items-center justify-between gap-4 shrink-0">
+    <div class="min-h-14 bg-dark-850 border-b border-dark-700 px-4 py-2 flex items-center justify-between gap-4 shrink-0">
       <!-- Filters -->
       <div class="flex items-center gap-2.5 flex-1">
         <span class="text-[9px] font-semibold tracking-[0.18em] text-brand/80">LIVE</span>
@@ -23,43 +23,23 @@
         </div>
 
         <!-- Search Input -->
-        <div class="relative flex-1 max-w-sm">
+        <div class="relative flex-1 max-w-md min-w-40">
           <Search class="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
           <input
-            v-model="logcatStore.filter.keyword"
+            v-model="searchDraft"
             type="text"
-            placeholder="搜索关键字..."
-            class="w-full pl-8 pr-16 py-1.5 bg-dark-900 border border-dark-700 rounded-md text-xs text-gray-100 placeholder:text-gray-600 focus:outline-none focus:border-brand"
-          />
-          <div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-1">
-            <button
-              @click="logcatStore.filter.isRegex = !logcatStore.filter.isRegex"
-              :class="logcatStore.filter.isRegex ? 'bg-brand text-white' : 'text-gray-400 hover:text-white'"
-              title="正则表达式"
-              class="px-1.5 py-0.5 text-[10px] font-mono rounded"
-            >
-              .*
-            </button>
-            <button
-              @click="logcatStore.filter.isCaseSensitive = !logcatStore.filter.isCaseSensitive"
-              :class="logcatStore.filter.isCaseSensitive ? 'bg-brand text-white' : 'text-gray-400 hover:text-white'"
-              title="大小写敏感"
-              class="px-1.5 py-0.5 text-[10px] font-mono rounded"
-            >
-              Aa
-            </button>
-          </div>
-        </div>
-
-        <!-- Tag Filter -->
-        <div class="relative w-44">
-          <input
-            v-model="logcatStore.filter.tag"
-            type="text"
-            placeholder="过滤 Tag..."
-            class="w-full px-2.5 py-1.5 bg-dark-900 border border-dark-700 rounded-md text-xs text-gray-100 placeholder:text-gray-600 focus:outline-none focus:border-brand"
+            placeholder="搜索消息或 Tag..."
+            aria-label="搜索消息或 Tag"
+            :aria-invalid="Boolean(searchError)"
+            class="w-full pl-8 pr-3 py-1.5 bg-dark-900 border rounded-md text-xs text-gray-100 placeholder:text-gray-600 focus:outline-none focus:border-brand"
+            :class="searchError ? 'border-red-500' : 'border-dark-700'"
           />
         </div>
+        <button @click="showAdvanced = !showAdvanced" :aria-expanded="showAdvanced"
+          class="px-2.5 py-1.5 rounded-md border border-dark-700 text-xs whitespace-nowrap"
+          :class="showAdvanced || hasAdvancedFilters ? 'text-brand bg-brand/10' : 'text-gray-400 hover:text-white'">
+          高级筛选{{ hasAdvancedFilters ? ' · 已启用' : '' }}
+        </button>
       </div>
 
       <!-- Actions -->
@@ -102,6 +82,45 @@
       </div>
     </div>
 
+    <div v-if="showAdvanced" class="shrink-0 border-b border-dark-700 bg-dark-850 px-4 py-3 grid grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+      <label class="flex flex-col gap-1 text-gray-400">Tag 包含
+        <input v-model="tagDraft" placeholder="例如 Network" class="filter-input" />
+      </label>
+      <label class="flex flex-col gap-1 text-gray-400">Tag 排除（逗号分隔）
+        <input v-model="excludeDraft" placeholder="例如 chatty, OpenGL" class="filter-input" />
+      </label>
+      <label class="flex flex-col gap-1 text-gray-400">PID 精确匹配
+        <input v-model="pidDraft" inputmode="numeric" placeholder="留空表示不限" :aria-invalid="Boolean(pidError)" class="filter-input" />
+        <span v-if="pidError" class="text-red-400">{{ pidError }}</span>
+      </label>
+      <div class="flex flex-col gap-2 text-gray-400">
+        <span>搜索选项</span>
+        <div class="flex gap-2">
+          <button @click="regexDraft = !regexDraft" :aria-pressed="regexDraft" class="filter-toggle" :class="regexDraft ? 'text-brand border-brand' : ''">.* 正则</button>
+          <button @click="caseDraft = !caseDraft" :aria-pressed="caseDraft" class="filter-toggle" :class="caseDraft ? 'text-brand border-brand' : ''">Aa 区分大小写</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="shrink-0 border-b border-dark-700 bg-dark-900 px-4 py-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-gray-500">
+      <span>缓冲 {{ logcatStore.entries.length.toLocaleString() }}</span>
+      <span>→</span><span>范围匹配 {{ logcatStore.scopeCount.toLocaleString() }}</span>
+      <span>→</span><span class="text-brand">显示 {{ filteredEntries.length.toLocaleString() }}</span>
+      <span class="h-3 w-px bg-dark-700 mx-1"></span>
+      <button v-if="deviceStore.selectedPackage" @click="void deviceStore.selectApp(null)" class="filter-chip" title="移除应用范围">
+        应用 {{ selectedAppLabel }} ×
+      </button>
+      <button v-if="logcatStore.filter.minLevel !== 'V'" @click="logcatStore.filter.minLevel = 'V'" class="filter-chip">级别 ≥ {{ logcatStore.filter.minLevel }} ×</button>
+      <button v-if="logcatStore.filter.keyword" @click="clearSearch" class="filter-chip" title="移除已生效的搜索条件">搜索 {{ logcatStore.filter.keyword }} ×</button>
+      <button v-if="logcatStore.filter.tag" @click="clearTag" class="filter-chip">Tag 包含 {{ logcatStore.filter.tag }} ×</button>
+      <button v-if="logcatStore.filter.excludeTags.length" @click="clearExcludedTags" class="filter-chip">Tag 排除 {{ logcatStore.filter.excludeTags.join(', ') }} ×</button>
+      <button v-if="logcatStore.filter.pid !== null" @click="clearPid" class="filter-chip">PID {{ logcatStore.filter.pid }} ×</button>
+      <button v-if="hasAnyFilters" @click="clearAllFilters" class="text-gray-400 hover:text-white underline underline-offset-2">清除全部</button>
+    </div>
+    <div v-if="searchError" class="shrink-0 bg-red-950/30 px-4 py-1.5 text-xs text-red-300" role="alert">
+      正则表达式无效：{{ searchError }}。继续使用上一次有效的搜索条件。
+    </div>
+
     <!-- Logcat Table Window -->
     <div
       ref="scrollContainer"
@@ -113,8 +132,12 @@
           <Terminal class="w-6 h-6 text-brand/50" />
         </div>
         <div class="text-center">
-          <div class="text-xs text-gray-400">等待设备日志</div>
-          <div class="mt-1 text-[10px] tracking-wide text-gray-600">连接设备并运行目标应用后，日志将在这里出现</div>
+          <div class="text-xs text-gray-400">{{ emptyStateTitle }}</div>
+          <div class="mt-1 text-[10px] tracking-wide text-gray-600">{{ emptyStateHint }}</div>
+          <button v-if="deviceStore.selectedPackage && deviceStore.selectedPids.length === 0" @click="void deviceStore.selectApp(null)"
+            class="mt-3 px-3 py-1.5 rounded border border-dark-700 text-brand hover:bg-dark-800">查看全部进程日志</button>
+          <button v-else-if="hasAnyFilters && logcatStore.entries.length > 0" @click="clearAllFilters"
+            class="mt-3 px-3 py-1.5 rounded border border-dark-700 text-brand hover:bg-dark-800">清除筛选条件</button>
         </div>
       </div>
 
@@ -175,9 +198,25 @@ import {
   ArrowDown
 } from 'lucide-vue-next'
 import { useLogcatStore } from '../stores/logcat'
+import { useDeviceStore } from '../stores/device'
 import { LogLevel } from '../types'
 
 const logcatStore = useLogcatStore()
+const deviceStore = useDeviceStore()
+const showAdvanced = ref(false)
+const searchDraft = ref(logcatStore.filter.keyword)
+const regexDraft = ref(logcatStore.filter.isRegex)
+const caseDraft = ref(logcatStore.filter.isCaseSensitive)
+const tagDraft = ref(logcatStore.filter.tag)
+const excludeDraft = ref(logcatStore.filter.excludeTags.join(', '))
+const pidDraft = ref(logcatStore.filter.pid?.toString() || '')
+const searchError = ref('')
+const pidError = computed(() => pidDraft.value && (!/^[1-9]\d*$/.test(pidDraft.value) || !Number.isSafeInteger(Number(pidDraft.value)))
+  ? '请输入有效的正整数 PID' : '')
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+let tagTimer: ReturnType<typeof setTimeout> | null = null
+let excludeTimer: ReturnType<typeof setTimeout> | null = null
+let pidTimer: ReturnType<typeof setTimeout> | null = null
 const scrollContainer = ref<HTMLDivElement | null>(null)
 const scrollOffset = ref(0)
 const viewportHeight = ref(600)
@@ -187,6 +226,103 @@ let resizeObserver: ResizeObserver | null = null
 let isUserScrolling = false
 
 const filteredEntries = computed(() => logcatStore.filteredEntries)
+const selectedAppLabel = computed(() => deviceStore.apps.find(app => app.packageName === deviceStore.selectedPackage)?.appName
+  || deviceStore.selectedPackage || '')
+const hasAdvancedFilters = computed(() => Boolean(logcatStore.filter.tag || logcatStore.filter.excludeTags.length ||
+  logcatStore.filter.pid !== null || logcatStore.filter.isRegex || logcatStore.filter.isCaseSensitive))
+const hasAnyFilters = computed(() => Boolean(deviceStore.selectedPackage || logcatStore.filter.minLevel !== 'V' ||
+  logcatStore.filter.keyword || hasAdvancedFilters.value))
+const emptyStateTitle = computed(() => {
+  if (!deviceStore.selectedSerial || !deviceStore.isOnline) return '未连接到可用设备'
+  if (deviceStore.selectedPackage && deviceStore.selectedPids.length === 0) return '目标应用当前未运行'
+  if (logcatStore.entries.length === 0) return '等待设备日志'
+  if (deviceStore.selectedPackage && logcatStore.scopeCount === 0) return '缓冲区内没有该应用的日志'
+  return '当前筛选条件没有匹配结果'
+})
+const emptyStateHint = computed(() => {
+  if (!deviceStore.selectedSerial || !deviceStore.isOnline) return '请先选择并连接 Android 设备'
+  if (deviceStore.selectedPackage && deviceStore.selectedPids.length === 0) return '启动应用后会自动识别新 PID；也可以查看全部进程日志'
+  if (logcatStore.entries.length === 0) return '正在采集日志；应用启动或操作设备后会在这里显示'
+  if (deviceStore.selectedPackage && logcatStore.scopeCount === 0) return '该应用当前 PID 没有出现在最近的缓冲日志中'
+  return '已收到日志，但被级别、搜索、Tag 或 PID 条件筛除'
+})
+
+watch([searchDraft, regexDraft, caseDraft], () => {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchError.value = ''
+  if (regexDraft.value && searchDraft.value) {
+    try {
+      new RegExp(searchDraft.value, caseDraft.value ? '' : 'i')
+    } catch (error) {
+      searchError.value = error instanceof Error ? error.message : '语法错误'
+      return
+    }
+  }
+  searchTimer = setTimeout(() => {
+    logcatStore.filter.keyword = searchDraft.value
+    logcatStore.filter.isRegex = regexDraft.value
+    logcatStore.filter.isCaseSensitive = caseDraft.value
+    searchTimer = null
+  }, 180)
+})
+
+watch(tagDraft, value => {
+  if (tagTimer) clearTimeout(tagTimer)
+  tagTimer = setTimeout(() => { logcatStore.filter.tag = value.trim(); tagTimer = null }, 180)
+})
+watch(excludeDraft, value => {
+  if (excludeTimer) clearTimeout(excludeTimer)
+  excludeTimer = setTimeout(() => {
+    logcatStore.filter.excludeTags = [...new Set(value.split(',').map(tag => tag.trim()).filter(Boolean))]
+    excludeTimer = null
+  }, 180)
+})
+watch(pidDraft, value => {
+  if (pidTimer) clearTimeout(pidTimer)
+  if (pidError.value) return
+  pidTimer = setTimeout(() => {
+    logcatStore.filter.pid = value ? Number(value) : null
+    pidTimer = null
+  }, 180)
+})
+
+function clearSearch(): void {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchDraft.value = ''
+  regexDraft.value = false
+  caseDraft.value = false
+  searchError.value = ''
+  logcatStore.filter.keyword = ''
+  logcatStore.filter.isRegex = false
+  logcatStore.filter.isCaseSensitive = false
+}
+
+function clearTag(): void {
+  if (tagTimer) clearTimeout(tagTimer)
+  tagDraft.value = ''
+  logcatStore.filter.tag = ''
+}
+
+function clearExcludedTags(): void {
+  if (excludeTimer) clearTimeout(excludeTimer)
+  excludeDraft.value = ''
+  logcatStore.filter.excludeTags = []
+}
+
+function clearPid(): void {
+  if (pidTimer) clearTimeout(pidTimer)
+  pidDraft.value = ''
+  logcatStore.filter.pid = null
+}
+
+function clearAllFilters(): void {
+  clearSearch()
+  clearTag()
+  clearExcludedTags()
+  clearPid()
+  logcatStore.clearDisplayFilters()
+  if (deviceStore.selectedPackage) void deviceStore.selectApp(null)
+}
 const firstVisibleIndex = computed(() => Math.max(0, Math.floor(scrollOffset.value / ROW_HEIGHT) - OVERSCAN_ROWS))
 const lastVisibleIndex = computed(() => Math.min(
   filteredEntries.value.length,
@@ -264,10 +400,14 @@ function scrollToBottomManual(): void {
 watch(
   () => filteredEntries.value.length,
   async () => {
-    if (logcatStore.autoScroll && scrollContainer.value) {
+    if (scrollContainer.value) {
       isUserScrolling = true
       await nextTick()
-      scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight
+      if (scrollContainer.value) {
+        if (logcatStore.autoScroll) scrollContainer.value.scrollTop = scrollContainer.value.scrollHeight
+        else scrollContainer.value.scrollTop = Math.min(scrollContainer.value.scrollTop,
+          Math.max(0, scrollContainer.value.scrollHeight - scrollContainer.value.clientHeight))
+      }
       isUserScrolling = false
     }
   }
@@ -286,5 +426,15 @@ onMounted(() => {
 onUnmounted(() => {
   resizeObserver?.disconnect()
   resizeObserver = null
+  if (searchTimer) clearTimeout(searchTimer)
+  if (tagTimer) clearTimeout(tagTimer)
+  if (excludeTimer) clearTimeout(excludeTimer)
+  if (pidTimer) clearTimeout(pidTimer)
 })
 </script>
+
+<style scoped>
+.filter-input { @apply bg-dark-900 border border-dark-700 rounded-md px-2.5 py-1.5 text-xs text-gray-100 placeholder:text-gray-600 focus:outline-none focus:border-brand; }
+.filter-chip { @apply max-w-48 truncate px-2 py-0.5 rounded border border-dark-700 bg-dark-850 text-gray-300 hover:text-white hover:border-brand; }
+.filter-toggle { @apply px-2 py-1 rounded border border-dark-700 text-gray-400 hover:text-white; }
+</style>

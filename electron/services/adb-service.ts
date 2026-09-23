@@ -59,7 +59,7 @@ export class AdbService {
   }
 
   public spawn(args: string[]): ChildProcess {
-    return spawn(this.adbPath, args)
+    return spawn(this.adbPath, args, { windowsHide: true })
   }
 
   public async getDevices(): Promise<DeviceItem[]> {

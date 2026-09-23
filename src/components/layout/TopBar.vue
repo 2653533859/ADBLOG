@@ -82,7 +82,7 @@
       </div>
 
       <div v-if="deviceStore.selectedPackage" class="text-[10px] px-2 py-1.5 bg-dark-850 border border-dark-700 rounded text-gray-400 whitespace-nowrap">
-        PID: <span class="text-brand font-mono">{{ deviceStore.selectedPid || '未运行' }}</span>
+        PID: <span class="text-brand font-mono">{{ deviceStore.selectedPids.length ? deviceStore.selectedPids.join(', ') : '未运行' }}</span>
       </div>
     </div>
 
@@ -115,12 +115,10 @@
 import { ref, computed } from 'vue'
 import { ChevronDown, RefreshCw, Unplug, Package, Wifi, Plus } from 'lucide-vue-next'
 import { useDeviceStore } from '../../stores/device'
-import { useLogcatStore } from '../../stores/logcat'
 import ConnectModal from '../modals/ConnectModal.vue'
 import ScanModal from '../modals/ScanModal.vue'
 
 const deviceStore = useDeviceStore()
-const logcatStore = useLogcatStore()
 
 const showConnectModal = ref(false)
 const showScanModal = ref(false)
@@ -150,7 +148,6 @@ async function onAppChange(e: Event): Promise<void> {
   const select = e.target as HTMLSelectElement
   const pkg = select.value || null
   await deviceStore.selectApp(pkg)
-  logcatStore.setTargetPid(deviceStore.selectedPid)
 }
 
 async function disconnectCurrent(): Promise<void> {

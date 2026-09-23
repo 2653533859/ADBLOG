@@ -23,6 +23,20 @@ export class ScrcpyService {
   private videoWidth = 0
   private videoHeight = 0
 
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    let timer: NodeJS.Timeout | null = null
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+        })
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
   public async startStream(serial: string, options: ScrcpyOptions, window: BrowserWindow):
     Promise<{ success: boolean; message: string; codec?: number }> {
     await this.stopStream()
@@ -46,10 +60,39 @@ export class ScrcpyService {
         videoBitRate: options.bitRate, stayAwake: options.stayAwake,
         sendDeviceMeta: false, sendFrameMeta: true
       })
-      client = await AdbScrcpyClient.start(adb, DEVICE_SERVER_PATH, scrcpyOptions)
-      const video = await client.videoStream
-      if (!video || generation !== this.generation) {
-        await client.close()
+      let video: VideoStream | undefined
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        let pendingClient: ReturnType<typeof AdbScrcpyClient.start> | null = null
+        try {
+          pendingClient = AdbScrcpyClient.start(adb, DEVICE_SERVER_PATH, scrcpyOptions)
+          client = await this.withTimeout(
+            pendingClient,
+            10_000,
+            '启动设备端 scrcpy 服务超时。'
+          )
+          video = await this.withTimeout(
+            client.videoStream,
+            10_000,
+            '设备端已启动，但视频通道握手超时。'
+          )
+          break
+        } catch (error) {
+          const startTimedOut = !client && error instanceof Error &&
+            error.message === '启动设备端 scrcpy 服务超时。'
+          // A timeout rejects the wait, not AdbScrcpyClient.start itself. Close a
+          // client that arrives after the timeout. Do not retry while it can still start.
+          if (!client && pendingClient) {
+            void pendingClient.then(lateClient => lateClient.close()).catch(() => undefined)
+          }
+          let closeFailed = false
+          await this.withTimeout(client?.close() ?? Promise.resolve(), 3000, '关闭残留投屏连接超时。')
+            .catch(() => { closeFailed = true })
+          client = null
+          if (attempt === 2 || generation !== this.generation || startTimedOut || closeFailed) throw error
+        }
+      }
+      if (!video || !client || generation !== this.generation) {
+        await client?.close()
         return { success: false, message: '投屏启动已取消。' }
       }
 

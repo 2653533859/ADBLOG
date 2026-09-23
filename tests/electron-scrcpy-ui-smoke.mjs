@@ -1,4 +1,6 @@
-const targets = await (await fetch('http://127.0.0.1:9223/json')).json()
+const port = Number(process.argv[2] || 9223)
+const serial = process.argv[3]
+const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json()
 const target = targets.find(item => item.title === 'ADBlog Studio')
 if (!target) throw new Error('ADBlog Studio CDP target not found')
 const socket = new WebSocket(target.webSocketDebuggerUrl)
@@ -24,6 +26,22 @@ async function evaluate(expression, awaitPromise = true) {
   })
   if (response.result?.exceptionDetails) throw new Error(response.result.exceptionDetails.text)
   return response.result?.result?.value
+}
+
+if (serial) {
+  await evaluate(`(async () => {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const select = document.querySelector('select')
+      const option = select?.querySelector('option[value=${JSON.stringify(serial)}]')
+      if (select && option) {
+        select.value = ${JSON.stringify(serial)}
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+        return
+      }
+      await new Promise(resolve => setTimeout(resolve, 250))
+    }
+    throw new Error('Requested device was not available')
+  })()`)
 }
 
 await evaluate(`[...document.querySelectorAll('button')].find(button => button.textContent?.includes('投屏'))?.click()`)

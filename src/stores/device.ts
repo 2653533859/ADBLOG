@@ -9,6 +9,7 @@ export const useDeviceStore = defineStore('device', {
     apps: [] as AppItem[],
     selectedPackage: null as string | null,
     selectedPid: null as number | null,
+    selectedPids: [] as number[],
     isScanning: false,
     scanResults: [] as ScanResult[],
     isLoadingApps: false,
@@ -34,6 +35,7 @@ export const useDeviceStore = defineStore('device', {
       } else if (this.devices.length === 0) {
         this.selectedPackage = null
         this.selectedPid = null
+        this.selectedPids = []
         this.selectedSerial = null
         this.deviceInfo = null
         this.apps = []
@@ -44,6 +46,7 @@ export const useDeviceStore = defineStore('device', {
       if (this.selectedSerial === serial) return
       this.selectedPackage = null
       this.selectedPid = null
+      this.selectedPids = []
       this.selectedSerial = serial
       await Promise.all([this.fetchDeviceInfo(serial), this.fetchApps(serial)])
     },
@@ -72,13 +75,23 @@ export const useDeviceStore = defineStore('device', {
 
     async selectApp(pkg: string | null): Promise<void> {
       this.selectedPackage = pkg
+      this.selectedPid = null
+      this.selectedPids = []
       if (!pkg || !this.selectedSerial || !window.electronAPI) {
-        this.selectedPid = null
         return
       }
+      await this.refreshSelectedAppPids()
+    },
+
+    async refreshSelectedAppPids(): Promise<void> {
+      if (!this.selectedPackage || !this.selectedSerial || !window.electronAPI) return
       const serial = this.selectedSerial
-      const pid = await window.electronAPI.getAppPid(serial, pkg)
-      if (this.selectedSerial === serial && this.selectedPackage === pkg) this.selectedPid = pid
+      const pkg = this.selectedPackage
+      const pids = await window.electronAPI.getAppPids(serial, pkg)
+      if (this.selectedSerial === serial && this.selectedPackage === pkg) {
+        this.selectedPids = pids
+        this.selectedPid = pids[0] ?? null
+      }
     },
 
     async connect(ip: string, port = 5555): Promise<{ success: boolean; message: string }> {

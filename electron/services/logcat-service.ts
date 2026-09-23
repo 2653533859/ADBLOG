@@ -3,15 +3,7 @@ import * as fs from 'fs'
 import { BrowserWindow } from 'electron'
 import { adbService } from './adb-service'
 import { LogcatEntry, LogLevel, LogcatFilterOptions } from '../../src/types'
-
-const LEVEL_WEIGHT: Record<LogLevel, number> = {
-  V: 1,
-  D: 2,
-  I: 3,
-  W: 4,
-  E: 5,
-  A: 6
-}
+import { filterLogcatEntries } from '../../src/utils/logcat-filter'
 
 export class LogcatService {
   private child: ChildProcess | null = null
@@ -26,12 +18,14 @@ export class LogcatService {
   // clicks and painting. Five updates per second still feels live while keeping
   // enough main-thread time available for interaction.
   private batchIntervalMs = 200
+  private restartTimer: NodeJS.Timeout | null = null
 
   private recordStream: fs.WriteStream | null = null
   private isRecording = false
   private window: BrowserWindow | null = null
 
   private lineRemainder = ''
+  private lastEntryRaw: string | null = null
   private logRegex = /^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+([^:]+):\s+(.*)$/
 
   public start(serial: string, window: BrowserWindow): void {
@@ -42,37 +36,9 @@ export class LogcatService {
     this.batchQueue = []
     this.idCounter = 1
     this.lineRemainder = ''
+    this.lastEntryRaw = null
 
-    this.child = adbService.spawn(['-s', serial, 'logcat', '-v', 'threadtime'])
-
-    const child = this.child
-    this.child.on('error', (error) => {
-      console.error('[LogcatService]', error)
-      if (this.child === child) this.stop()
-    })
-    this.child.stdout?.on('data', (chunk: Buffer) => {
-      const text = this.lineRemainder + chunk.toString('utf8')
-      const lines = text.split('\n')
-      this.lineRemainder = lines.pop() || ''
-
-      for (const rawLine of lines) {
-        const line = rawLine.trim()
-        if (!line) continue
-
-        const entry = this.parseLine(line)
-        if (entry) {
-          this.pushEntry(entry)
-          if (this.isRecording && this.recordStream) {
-            this.recordStream.write(`${entry.raw}\n`)
-          }
-        }
-      }
-    })
-
-    this.child.on('exit', () => {
-      console.log('[LogcatService] Logcat process exited')
-      if (this.child === child) this.stop()
-    })
+    this.launchCollector(serial, window)
 
     this.batchTimer = setInterval(() => {
       if (this.batchQueue.length > 0 && !window.isDestroyed()) {
@@ -83,7 +49,70 @@ export class LogcatService {
     }, this.batchIntervalMs)
   }
 
+  private launchCollector(serial: string, window: BrowserWindow): void {
+    if (this.currentSerial !== serial || window.isDestroyed()) return
+    // Each launch begins with -T 1, which can replay the final line already
+    // collected by the previous process. Only that first parsed line may be a replay.
+    let replayCandidate = this.lastEntryRaw
+    this.lineRemainder = ''
+    this.child = adbService.spawn(['-s', serial, 'logcat', '-v', 'threadtime', '-T', '1'])
+
+    const child = this.child
+    this.child.on('error', (error) => {
+      console.error('[LogcatService]', error)
+      this.handleCollectorExit(child, serial, window)
+    })
+    this.child.stderr?.on('data', (chunk: Buffer) => {
+      const message = chunk.toString('utf8').trim()
+      if (message) console.error('[LogcatService]', message)
+    })
+    this.child.stdout?.on('data', (chunk: Buffer) => {
+      if (this.child !== child) return
+      const text = this.lineRemainder + chunk.toString('utf8')
+      const lines = text.split('\n')
+      this.lineRemainder = lines.pop() || ''
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim()
+        if (!line) continue
+
+        const entry = this.parseLine(line)
+        if (entry) {
+          if (replayCandidate !== null) {
+            const isReplay = entry.raw === replayCandidate
+            replayCandidate = null
+            if (isReplay) continue
+          }
+          this.pushEntry(entry)
+          if (this.isRecording && this.recordStream) {
+            this.recordStream.write(`${entry.raw}\n`)
+          }
+        }
+      }
+    })
+
+    this.child.on('exit', () => {
+      console.log('[LogcatService] Logcat process exited')
+      this.handleCollectorExit(child, serial, window)
+    })
+  }
+
+  private handleCollectorExit(child: ChildProcess, serial: string, window: BrowserWindow): void {
+    if (this.child !== child) return
+    this.child = null
+    if (this.currentSerial !== serial || window.isDestroyed() || this.restartTimer) return
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null
+      this.launchCollector(serial, window)
+    }, 1000)
+  }
+
   public stop(): void {
+    this.currentSerial = null
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
     if (this.batchTimer) {
       clearInterval(this.batchTimer)
       this.batchTimer = null
@@ -95,13 +124,13 @@ export class LogcatService {
     }
 
     this.stopRecording()
-    this.currentSerial = null
   }
 
   public clear(serial?: string): Promise<string> {
     this.ringBuffer = []
     this.batchQueue = []
     this.lineRemainder = ''
+    this.lastEntryRaw = null
     if (serial) {
       return adbService.exec(['-s', serial, 'logcat', '-c']).catch(() => '')
     }
@@ -142,6 +171,7 @@ export class LogcatService {
   }
 
   private pushEntry(entry: LogcatEntry): void {
+    this.lastEntryRaw = entry.raw
     this.ringBuffer.push(entry)
     if (this.ringBuffer.length > this.maxBufferSize) {
       this.ringBuffer.shift()
@@ -175,53 +205,7 @@ export class LogcatService {
   }
 
   public getBufferedLogs(filter?: LogcatFilterOptions): LogcatEntry[] {
-    if (!filter) {
-      return this.ringBuffer
-    }
-
-    let regex: RegExp | null = null
-    if (filter.keyword && filter.isRegex) {
-      try {
-        regex = new RegExp(filter.keyword, filter.isCaseSensitive ? '' : 'i')
-      } catch {
-        regex = null
-      }
-    }
-
-    const minWeight = LEVEL_WEIGHT[filter.minLevel] || 1
-
-    return this.ringBuffer.filter(item => {
-      if (filter.targetPid !== null && item.pid !== filter.targetPid) {
-        return false
-      }
-
-      if (LEVEL_WEIGHT[item.level] < minWeight) {
-        return false
-      }
-
-      if (filter.tag && !item.tag.toLowerCase().includes(filter.tag.toLowerCase())) {
-        return false
-      }
-
-      if (filter.excludeTags.length > 0) {
-        for (const ex of filter.excludeTags) {
-          if (item.tag.includes(ex)) return false
-        }
-      }
-
-      if (filter.keyword) {
-        if (regex) {
-          return regex.test(item.message) || regex.test(item.tag)
-        }
-        if (filter.isCaseSensitive) {
-          return item.message.includes(filter.keyword) || item.tag.includes(filter.keyword)
-        }
-        return item.message.toLowerCase().includes(filter.keyword.toLowerCase()) ||
-               item.tag.toLowerCase().includes(filter.keyword.toLowerCase())
-      }
-
-      return true
-    })
+    return filter ? filterLogcatEntries(this.ringBuffer, filter).entries : this.ringBuffer
   }
 }
 

@@ -1,14 +1,16 @@
 import { defineStore } from 'pinia'
 import { markRaw } from 'vue'
 import { LogcatEntry, LogcatFilterOptions, LogLevel } from '../types'
+import { filterLogcatEntries } from '../utils/logcat-filter'
 
-const LEVEL_WEIGHT: Record<LogLevel, number> = {
-  V: 1,
-  D: 2,
-  I: 3,
-  W: 4,
-  E: 5,
-  A: 6
+// The main process owns one logcat stream. Keep its stop/start IPC calls in
+// order even when the selected device changes while a call is still pending.
+let streamCommand: Promise<void> = Promise.resolve()
+
+function queueStreamCommand(command: () => Promise<void>): Promise<void> {
+  const current = streamCommand.then(command)
+  streamCommand = current.catch(() => undefined)
+  return current
 }
 
 export const useLogcatStore = defineStore('logcat', {
@@ -16,7 +18,8 @@ export const useLogcatStore = defineStore('logcat', {
     entries: [] as LogcatEntry[],
     maxDisplayEntries: 15000,
     filter: {
-      targetPid: null,
+      targetPids: null,
+      pid: null,
       minLevel: 'V',
       keyword: '',
       isRegex: false,
@@ -34,89 +37,64 @@ export const useLogcatStore = defineStore('logcat', {
     currentSerial: null as string | null,
     unsubscribe: null as (() => void) | null,
     rateCounter: 0,
-    rateInterval: null as NodeJS.Timeout | null
+    rateInterval: null as NodeJS.Timeout | null,
+    streamGeneration: 0
   }),
 
   getters: {
-    filteredEntries: (state): LogcatEntry[] => {
-      let regex: RegExp | null = null
-      if (state.filter.keyword && state.filter.isRegex) {
-        try {
-          regex = new RegExp(state.filter.keyword, state.filter.isCaseSensitive ? '' : 'i')
-        } catch {
-          regex = null
-        }
-      }
-
-      const minWeight = LEVEL_WEIGHT[state.filter.minLevel] || 1
-      const tagLower = state.filter.tag.toLowerCase()
-      const kwLower = state.filter.keyword.toLowerCase()
-
-      return state.entries.filter(entry => {
-        if (state.filter.targetPid !== null && entry.pid !== state.filter.targetPid) {
-          return false
-        }
-        if (LEVEL_WEIGHT[entry.level] < minWeight) {
-          return false
-        }
-        if (tagLower && !entry.tag.toLowerCase().includes(tagLower)) {
-          return false
-        }
-        if (state.filter.excludeTags.length > 0) {
-          for (const ex of state.filter.excludeTags) {
-            if (entry.tag.includes(ex)) return false
-          }
-        }
-        if (state.filter.keyword) {
-          if (regex) {
-            return regex.test(entry.message) || regex.test(entry.tag)
-          }
-          if (state.filter.isCaseSensitive) {
-            return entry.message.includes(state.filter.keyword) || entry.tag.includes(state.filter.keyword)
-          }
-          return entry.message.toLowerCase().includes(kwLower) || entry.tag.toLowerCase().includes(kwLower)
-        }
-        return true
-      })
-    }
+    filterResult: (state) => filterLogcatEntries(state.entries, state.filter),
+    filteredEntries(): LogcatEntry[] { return this.filterResult.entries },
+    scopeCount(): number { return this.filterResult.scopeCount }
   },
 
   actions: {
-    startStream(serial: string): void {
+    async startStream(serial: string): Promise<void> {
       if (!window.electronAPI) return
-      this.stopStream()
-      this.unsubscribeRecording = window.electronAPI.onRecordingError((message) => {
-        this.isRecording = false
-        this.recordingPath = null
-        this.recordingError = message
-        window.alert(`Log recording failed: ${message}`)
-      })
-      this.currentSerial = serial
-      this.entries = []
-      this.rateCounter = 0
-      this.logRate = 0
-
-      window.electronAPI.startLogcat(serial)
-
-      this.unsubscribe = window.electronAPI.onLogcatBatch((newEntries) => {
-        this.rateCounter += newEntries.length
-        if (!this.isPaused) {
-          // Log entries are immutable. Avoid creating thousands of deep Vue
-          // proxies per second when only the array itself needs to be reactive.
-          this.entries.push(...newEntries.map(entry => markRaw(entry)))
-          if (this.entries.length > this.maxDisplayEntries) {
-            this.entries.splice(0, this.entries.length - this.maxDisplayEntries)
+      const generation = ++this.streamGeneration
+      this.cleanupRendererStream()
+      await queueStreamCommand(async () => {
+        await window.electronAPI.stopLogcat()
+        if (generation !== this.streamGeneration) return
+        this.currentSerial = serial
+        this.entries = []
+        this.rateCounter = 0
+        this.logRate = 0
+        this.unsubscribeRecording = window.electronAPI.onRecordingError((message) => {
+          if (generation !== this.streamGeneration) return
+          this.isRecording = false
+          this.recordingPath = null
+          this.recordingError = message
+          window.alert(`Log recording failed: ${message}`)
+        })
+        // Subscribe before starting: the main process can send its first batch
+        // before the start IPC reply reaches the renderer.
+        this.unsubscribe = window.electronAPI.onLogcatBatch((newEntries) => {
+          if (generation !== this.streamGeneration) return
+          this.rateCounter += newEntries.length
+          if (!this.isPaused) {
+            // Log entries are immutable. Avoid creating thousands of deep Vue
+            // proxies per second when only the array itself needs to be reactive.
+            this.entries.push(...newEntries.map(entry => markRaw(entry)))
+            if (this.entries.length > this.maxDisplayEntries) {
+              this.entries.splice(0, this.entries.length - this.maxDisplayEntries)
+            }
           }
+        })
+        this.rateInterval = setInterval(() => {
+          if (generation !== this.streamGeneration) return
+          this.logRate = this.rateCounter
+          this.rateCounter = 0
+        }, 1000)
+        try {
+          await window.electronAPI.startLogcat(serial)
+        } catch (error) {
+          if (generation === this.streamGeneration) this.cleanupRendererStream()
+          throw error
         }
       })
-
-      this.rateInterval = setInterval(() => {
-        this.logRate = this.rateCounter
-        this.rateCounter = 0
-      }, 1000)
     },
 
-    stopStream(): void {
+    cleanupRendererStream(): void {
       this.unsubscribeRecording?.()
       this.unsubscribeRecording = null
       if (this.unsubscribe) {
@@ -127,13 +105,18 @@ export const useLogcatStore = defineStore('logcat', {
         clearInterval(this.rateInterval)
         this.rateInterval = null
       }
-      if (window.electronAPI) {
-        window.electronAPI.stopLogcat()
-      }
       this.isRecording = false
       this.recordingPath = null
       this.currentSerial = null
       this.logRate = 0
+    },
+
+    async stopStream(): Promise<void> {
+      ++this.streamGeneration
+      this.cleanupRendererStream()
+      if (window.electronAPI) {
+        await queueStreamCommand(() => window.electronAPI.stopLogcat())
+      }
     },
 
     async clear(): Promise<void> {
@@ -174,12 +157,27 @@ export const useLogcatStore = defineStore('logcat', {
       return ok
     },
 
-    setTargetPid(pid: number | null): void {
-      this.filter.targetPid = pid
+    setTargetPids(pids: number[] | null): void {
+      this.filter.targetPids = pids
+    },
+
+    retainTargetPids(pids: number[]): void {
+      if (this.filter.targetPids === null || pids.length === 0) return
+      this.filter.targetPids = [...new Set([...this.filter.targetPids, ...pids])]
     },
 
     setMinLevel(level: LogLevel): void {
       this.filter.minLevel = level
+    },
+
+    clearDisplayFilters(): void {
+      this.filter.minLevel = 'V'
+      this.filter.keyword = ''
+      this.filter.isRegex = false
+      this.filter.isCaseSensitive = false
+      this.filter.tag = ''
+      this.filter.excludeTags = []
+      this.filter.pid = null
     }
   }
 })

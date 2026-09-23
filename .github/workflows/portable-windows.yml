@@ -1,0 +1,35 @@
+name: Windows portable build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run portable
+      - run: node tests/regression.cjs
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        run: |
+          $artifact = 'release/ADBlog-Studio-V0.0.1-Portable.exe'
+          $digest = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash
+          Set-Content -LiteralPath "$artifact.sha256" -Value "$digest  ADBlog-Studio-V0.0.1-Portable.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ADBlog-Studio-V0.0.1-Portable-${{ github.sha }}
+          path: |
+            release/ADBlog-Studio-V0.0.1-Portable.exe
+            release/ADBlog-Studio-V0.0.1-Portable.exe.sha256
+          if-no-files-found: error
