@@ -55,6 +55,41 @@ export interface LogcatEntry {
   raw: string;
 }
 
+export interface LogSession {
+  format: 'adblog-log-session-v1';
+  savedAt: string;
+  serial: string;
+  selectedPackage: string | null;
+  filter: LogcatFilterOptions;
+  entries: LogcatEntry[];
+  bookmarkedIds: number[];
+  incidents?: IncidentEvent[];
+  performanceSamples?: PerfMetricsSample[];
+  timelineEvents?: TimelineEvent[];
+}
+
+export interface IncidentEvent {
+  id: string;
+  serial: string;
+  kind: 'crash' | 'anr' | 'native-crash';
+  occurredAt: number;
+  logId: number;
+  pid: number;
+  title: string;
+  signature: string;
+  excerpt: string[];
+}
+
+export interface TimelineEvent {
+  id: string;
+  serial: string;
+  at: number;
+  kind: 'bookmark' | 'recording-start' | 'recording-end' | 'note';
+  title: string;
+  detail?: string;
+  logId?: number;
+}
+
 export interface LogcatFilterOptions {
   targetPids: number[] | null;
   pid: number | null;
@@ -101,6 +136,7 @@ export interface RemoteFileItem {
 
 export interface FileTransferTask {
   taskId: string;
+  serial: string;
   direction: 'push' | 'pull';
   localPath: string;
   remotePath: string;

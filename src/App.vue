@@ -35,36 +35,53 @@ import StatusBar from './components/layout/StatusBar.vue'
 
 import LogcatView from './views/LogcatView.vue'
 import ScrcpyView from './views/ScrcpyView.vue'
+import MultiMonitorView from './views/MultiMonitorView.vue'
 import FileView from './views/FileView.vue'
 import TerminalView from './views/TerminalView.vue'
 import PerfView from './views/PerfView.vue'
 import AppsView from './views/AppsView.vue'
 import DeviceInfoView from './views/DeviceInfoView.vue'
+import DiagnosticsView from './views/DiagnosticsView.vue'
+import LogSessionsView from './views/LogSessionsView.vue'
+import IncidentsView from './views/IncidentsView.vue'
+import TimelineView from './views/TimelineView.vue'
+import DevicesView from './views/DevicesView.vue'
+import TraceView from './views/TraceView.vue'
 
 import { useDeviceStore } from './stores/device'
 import { useLogcatStore } from './stores/logcat'
+import { useDeviceWorkspacesStore } from './stores/device-workspaces'
 
 const activeTab = ref('logcat')
 const appIconUrl = './app-icon.png'
 const deviceStore = useDeviceStore()
 const logcatStore = useLogcatStore()
+const workspaces = useDeviceWorkspacesStore()
 let pidRefreshTimer: ReturnType<typeof setInterval> | null = null
 let pidRefreshInFlight = false
 
 const currentViewComponent = computed(() => {
   switch (activeTab.value) {
     case 'logcat': return LogcatView
+    case 'sessions': return LogSessionsView
+    case 'incidents': return IncidentsView
+    case 'timeline': return TimelineView
+    case 'devices': return DevicesView
+    case 'trace': return TraceView
     case 'scrcpy': return ScrcpyView
+    case 'multi': return MultiMonitorView
     case 'files': return FileView
     case 'terminal': return TerminalView
     case 'perf': return PerfView
     case 'apps': return AppsView
     case 'info': return DeviceInfoView
+    case 'diagnostics': return DiagnosticsView
     default: return LogcatView
   }
 })
 
-watch(() => deviceStore.selectedSerial, (serial) => {
+watch(() => deviceStore.selectedSerial, (serial, previous) => {
+  if (previous && logcatStore.currentSerial === previous) workspaces.saveLogs(previous, logcatStore.entries)
   logcatStore.setTargetPids(null)
   void (serial ? logcatStore.startStream(serial) : logcatStore.stopStream())
 }, { flush: 'sync' })
@@ -94,9 +111,8 @@ watch(() => deviceStore.selectedPids, (pids) => {
   if (deviceStore.selectedPackage) logcatStore.retainTargetPids(pids)
 })
 
-onMounted(async () => {
-  await deviceStore.fetchDevices()
-
+onMounted(() => {
+  void deviceStore.fetchDevices().catch(error => console.error('Failed to query ADB devices:', error))
 })
 
 onBeforeUnmount(() => {

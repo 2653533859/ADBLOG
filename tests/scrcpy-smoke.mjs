@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { randomInt } from 'node:crypto'
 import { AdbServerClient } from '@yume-chan/adb'
 import { AdbServerNodeTcpConnector } from '@yume-chan/adb-server-node-tcp'
 import { AdbScrcpyClient, AdbScrcpyOptionsLatest } from '@yume-chan/adb-scrcpy'
@@ -20,6 +21,7 @@ await AdbScrcpyClient.pushServer(adb, new PushReadableStream(async controller =>
 }), '/data/local/tmp/adblog-scrcpy-server.jar')
 
 const options = new AdbScrcpyOptionsLatest({
+  scid: randomInt(0x80000000).toString(16),
   video: true, audio: false, control: true, videoCodec: 'h264',
   maxSize, maxFps, videoBitRate,
   sendDeviceMeta: false, sendFrameMeta: true

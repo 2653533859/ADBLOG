@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
-import { RemoteFileItem } from '../types'
+import { FileTransferTask, RemoteFileItem } from '../types'
+import { useDeviceStore } from './device'
 
 export const useFileStore = defineStore('files', {
   state: () => ({
@@ -9,16 +10,22 @@ export const useFileStore = defineStore('files', {
     selectedFile: null as RemoteFileItem | null,
     history: ['/sdcard'] as string[],
     historyIndex: 0,
-    transferMessage: null as string | null
+    transferMessage: null as string | null,
+    transfers: [] as FileTransferTask[],
+    transferRunning: false,
+    progressSubscribed: false,
+    latestLoadId: 0
   }),
 
   actions: {
     async loadPath(serial: string, targetPath: string): Promise<void> {
-      if (!window.electronAPI) return
+      if (!window.electronAPI || useDeviceStore().selectedSerial !== serial) return
+      const loadId = ++this.latestLoadId
       this.isLoading = true
       this.selectedFile = null
       try {
         const list = await window.electronAPI.listFiles(serial, targetPath)
+        if (loadId !== this.latestLoadId || useDeviceStore().selectedSerial !== serial) return
         this.files = list
         this.currentPath = targetPath
 
@@ -28,7 +35,7 @@ export const useFileStore = defineStore('files', {
           this.historyIndex = this.history.length - 1
         }
       } finally {
-        this.isLoading = false
+        if (loadId === this.latestLoadId) this.isLoading = false
       }
     },
 
@@ -90,20 +97,13 @@ export const useFileStore = defineStore('files', {
       if (!window.electronAPI) return false
       const localFile = await window.electronAPI.showOpenDialogFile()
       if (!localFile) return false
+      let size = 0
+      try { size = await window.electronAPI.getLocalFileSize(localFile) }
+      catch { return false }
 
-      this.transferMessage = '正在上传...'
-      try {
-        const res = await window.electronAPI.pushFile(serial, localFile, this.currentPath)
-        this.transferMessage = res.success ? '上传成功' : `上传失败: ${res.message}`
-        await this.loadPath(serial, this.currentPath)
-        setTimeout(() => {
-          this.transferMessage = null
-        }, 3000)
-        return res.success
-      } catch {
-        this.transferMessage = '上传异常'
-        return false
-      }
+      this.enqueueTransfer({ taskId: crypto.randomUUID(), serial, direction: 'push', localPath: localFile,
+        remotePath: this.currentPath, totalBytes: size, transferredBytes: 0, speedBps: 0, status: 'pending' })
+      return true
     },
 
     async downloadFile(serial: string, item: RemoteFileItem): Promise<boolean> {
@@ -111,18 +111,68 @@ export const useFileStore = defineStore('files', {
       const localTarget = await window.electronAPI.showSaveDialog(item.name)
       if (!localTarget) return false
 
-      this.transferMessage = '正在下载...'
-      try {
-        const res = await window.electronAPI.pullFile(serial, item.path, localTarget)
-        this.transferMessage = res.success ? '下载成功' : `下载失败: ${res.message}`
-        setTimeout(() => {
-          this.transferMessage = null
-        }, 3000)
-        return res.success
-      } catch {
-        this.transferMessage = '下载异常'
-        return false
+      this.enqueueTransfer({ taskId: crypto.randomUUID(), serial, direction: 'pull', localPath: localTarget,
+        remotePath: item.path, totalBytes: item.size, transferredBytes: 0, speedBps: 0, status: 'pending' })
+      return true
+    },
+
+    enqueueTransfer(task: FileTransferTask): void {
+      if (!this.progressSubscribed) {
+        window.electronAPI.onFileTransferProgress(({ taskId, percent }) => {
+          const current = this.transfers.find(item => item.taskId === taskId)
+          if (current && current.status === 'transferring') {
+            current.transferredBytes = Math.round(current.totalBytes * percent / 100)
+          }
+        })
+        this.progressSubscribed = true
       }
+      this.transfers.unshift(task)
+      void this.runTransferQueue()
+    },
+
+    async cancelTransfer(taskId: string): Promise<void> {
+      const task = this.transfers.find(item => item.taskId === taskId)
+      if (task?.status === 'pending') task.status = 'canceled'
+      else if (task?.status === 'transferring') await window.electronAPI.cancelFileTransfer(taskId)
+    },
+
+    retryTransfer(taskId: string): void {
+      const task = this.transfers.find(item => item.taskId === taskId)
+      if (!task || (task.status !== 'failed' && task.status !== 'canceled')) return
+      task.error = undefined
+      task.status = 'pending'
+      void this.runTransferQueue()
+    },
+
+    clearFinishedTransfers(): void {
+      this.transfers = this.transfers.filter(item => item.status === 'pending' || item.status === 'transferring')
+    },
+
+    async runTransferQueue(): Promise<void> {
+      if (this.transferRunning || !window.electronAPI) return
+      this.transferRunning = true
+      try {
+        while (true) {
+          const task = [...this.transfers].reverse().find(item => item.status === 'pending')
+          if (!task) break
+          task.status = 'transferring'
+          const started = performance.now()
+          try {
+            const result = await window.electronAPI.transferFile({ ...task })
+            task.status = result.canceled ? 'canceled' : result.success ? 'completed' : 'failed'
+            if (!result.success) task.error = result.message
+            else {
+              task.transferredBytes = task.totalBytes
+              task.speedBps = task.totalBytes / Math.max(0.001, (performance.now() - started) / 1000)
+              if (task.direction === 'push' && task.remotePath === this.currentPath &&
+                useDeviceStore().selectedSerial === task.serial) await this.loadPath(task.serial, this.currentPath)
+            }
+          } catch (error) {
+            task.status = 'failed'
+            task.error = error instanceof Error ? error.message : String(error)
+          }
+        }
+      } finally { this.transferRunning = false }
     }
   }
 })

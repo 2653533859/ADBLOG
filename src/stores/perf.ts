@@ -8,7 +8,8 @@ export const usePerfStore = defineStore('perf', {
     currentSample: null as PerfMetricsSample | null,
     isMonitoring: false,
     unsubscribe: null as (() => void) | null,
-    currentSerial: null as string | null
+    currentSerial: null as string | null,
+    historySerial: null as string | null
   }),
 
   actions: {
@@ -16,6 +17,7 @@ export const usePerfStore = defineStore('perf', {
       if (!window.electronAPI) return
       this.stopMonitoring()
       this.currentSerial = serial
+      this.historySerial = serial
       this.isMonitoring = true
       this.history = []
       this.currentSample = null
@@ -46,6 +48,13 @@ export const usePerfStore = defineStore('perf', {
     clearHistory(): void {
       this.history = []
       this.currentSample = null
+      this.historySerial = null
+    },
+
+    getHistoryForDevice(serial: string): PerfMetricsSample[] {
+      return this.historySerial === serial
+        ? this.history.map(sample => JSON.parse(JSON.stringify(sample)) as PerfMetricsSample)
+        : []
     },
 
     async exportCsv(): Promise<boolean> {

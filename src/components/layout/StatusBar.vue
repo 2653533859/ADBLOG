@@ -4,6 +4,7 @@
       <div class="flex items-center gap-1.5">
         <span class="w-2 h-2 rounded-full" :class="deviceStore.isOnline ? 'bg-emerald-500' : 'bg-red-500'"></span>
         <span class="text-gray-400">{{ deviceStore.selectedDevice?.model || '未选择设备' }}</span>
+        <span v-if="deviceStore.selectedDevice" class="text-gray-500">{{ deviceStore.selectedDevice.connectionType === 'usb' ? 'USB' : 'Wi-Fi' }}</span>
         <span v-if="deviceStore.selectedSerial" class="text-gray-500">({{ deviceStore.selectedSerial }})</span>
       </div>
 

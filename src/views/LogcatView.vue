@@ -44,6 +44,7 @@
 
       <!-- Actions -->
       <div class="flex items-center gap-1.5">
+        <button @click="saveSession" title="保存日志会话" class="p-1.5 bg-dark-800 hover:bg-dark-700 border border-dark-700 text-gray-300 rounded-md"><Save class="w-4 h-4" /></button>
         <button
           @click="logcatStore.togglePause"
           :title="logcatStore.isPaused ? '继续' : '暂停'"
@@ -150,6 +151,8 @@
           class="flex items-center h-6 px-2 hover:bg-dark-800/80 group leading-6"
           :class="getRowClass(log.level)"
         >
+          <button @click="toggleBookmark(log.id)" :title="bookmarkedIds.includes(log.id) ? '移除标记' : '标记关键日志'"
+            class="w-6 shrink-0 text-center select-none" :class="bookmarkedIds.includes(log.id) ? 'text-amber-400' : 'text-gray-700 group-hover:text-gray-400'">★</button>
           <!-- Time -->
           <span class="text-gray-500 w-36 shrink-0 select-none">{{ log.timestamp }}</span>
           <!-- PID-TID -->
@@ -195,14 +198,49 @@ import {
   Trash2,
   Circle,
   Terminal,
-  ArrowDown
+  ArrowDown,
+  Save
 } from 'lucide-vue-next'
 import { useLogcatStore } from '../stores/logcat'
 import { useDeviceStore } from '../stores/device'
-import { LogLevel } from '../types'
+import { useIncidentStore } from '../stores/incidents'
+import { useTimelineStore } from '../stores/timeline'
+import { usePerfStore } from '../stores/perf'
+import { logTimestampToEpoch } from '../utils/incident-detection'
+import { LogLevel, LogSession } from '../types'
 
 const logcatStore = useLogcatStore()
 const deviceStore = useDeviceStore()
+const incidentStore = useIncidentStore()
+const timelineStore = useTimelineStore()
+const perfStore = usePerfStore()
+const bookmarkedIds = computed(() => timelineStore.events
+  .filter(event => event.serial === deviceStore.selectedSerial && event.kind === 'bookmark')
+  .map(event => event.logId).filter((id): id is number => id !== undefined))
+
+function toggleBookmark(id: number): void {
+  const serial = deviceStore.selectedSerial
+  const entry = logcatStore.entries.find(value => value.id === id)
+  if (serial && entry) timelineStore.toggleBookmark(serial, id,
+    logTimestampToEpoch(entry.timestamp), `${entry.tag}: ${entry.message.slice(0, 80)}`)
+}
+
+async function saveSession(): Promise<void> {
+  if (!deviceStore.selectedSerial || logcatStore.entries.length === 0) return
+  const destination = await window.electronAPI.showSaveDialog(`ADBlog-session-${Date.now()}.json`)
+  if (!destination) return
+  const session: LogSession = {
+    format: 'adblog-log-session-v1', savedAt: new Date().toISOString(),
+    serial: deviceStore.selectedSerial, selectedPackage: deviceStore.selectedPackage,
+    filter: JSON.parse(JSON.stringify(logcatStore.filter)),
+    entries: logcatStore.entries.map(entry => ({ ...entry })),
+    bookmarkedIds: bookmarkedIds.value.filter(id => logcatStore.entries.some(entry => entry.id === id)),
+    incidents: incidentStore.forDevice(deviceStore.selectedSerial).map(event => ({ ...event, excerpt: [...event.excerpt] })),
+    performanceSamples: perfStore.getHistoryForDevice(deviceStore.selectedSerial),
+    timelineEvents: timelineStore.forDevice(deviceStore.selectedSerial).map(event => ({ ...event }))
+  }
+  await window.electronAPI.writeTextFile(destination, JSON.stringify(session))
+}
 const showAdvanced = ref(false)
 const searchDraft = ref(logcatStore.filter.keyword)
 const regexDraft = ref(logcatStore.filter.isRegex)

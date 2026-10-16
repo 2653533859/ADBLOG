@@ -6,10 +6,16 @@ import { LogcatEntry, LogLevel, LogcatFilterOptions } from '../../src/types'
 import { filterLogcatEntries } from '../../src/utils/logcat-filter'
 
 export class LogcatService {
+  constructor(private readonly eventSerial: string | null = null, maxBufferSize = 50000) {
+    this.maxBufferSize = maxBufferSize
+  }
   private child: ChildProcess | null = null
   private currentSerial: string | null = null
+  public getBufferedLogsForSerial(serial: string): LogcatEntry[] {
+    return this.currentSerial === serial ? this.getBufferedLogs() : []
+  }
   private ringBuffer: LogcatEntry[] = []
-  private maxBufferSize = 50000
+  private maxBufferSize: number
   private idCounter = 1
 
   private batchQueue: LogcatEntry[] = []
@@ -44,7 +50,8 @@ export class LogcatService {
       if (this.batchQueue.length > 0 && !window.isDestroyed()) {
         const toSend = this.batchQueue
         this.batchQueue = []
-        window.webContents.send('logcat-batch', toSend)
+        if (this.eventSerial) window.webContents.send('multi-logcat-batch', { serial: this.eventSerial, entries: toSend })
+        else window.webContents.send('logcat-batch', toSend)
       }
     }, this.batchIntervalMs)
   }
@@ -137,18 +144,19 @@ export class LogcatService {
     return Promise.resolve('')
   }
 
-  public async startRecording(filePath: string): Promise<boolean> {
+  public async startRecording(filePath: string, append = true): Promise<boolean> {
     this.stopRecording()
     if (!this.child) return false
     return new Promise(resolve => {
-      const stream = fs.createWriteStream(filePath, { flags: 'a', encoding: 'utf8' })
+      const stream = fs.createWriteStream(filePath, { flags: append ? 'a' : 'w', encoding: 'utf8' })
       this.recordStream = stream
       stream.on('error', (error) => {
         if (this.recordStream === stream) {
           this.recordStream = null
           this.isRecording = false
           if (this.window && !this.window.isDestroyed()) {
-            this.window.webContents.send('logcat-recording-error', error.message)
+            if (this.eventSerial) this.window.webContents.send('multi-logcat-recording-error', { serial: this.eventSerial, message: error.message })
+            else this.window.webContents.send('logcat-recording-error', error.message)
           }
         }
         resolve(false)

@@ -86,6 +86,23 @@
       </button>
     </div>
 
+    <div v-if="fileStore.transfers.length" class="border-b border-dark-700 bg-dark-850 px-4 py-2 shrink-0 max-h-36 overflow-y-auto">
+      <div class="flex items-center justify-between text-[10px] text-gray-500 mb-1">
+        <span>传输队列 · {{ fileStore.transfers.filter(item => item.status === 'pending').length }} 待处理</span>
+        <button class="hover:text-white" @click="fileStore.clearFinishedTransfers()">清理已结束</button>
+      </div>
+      <div v-for="task in fileStore.transfers" :key="task.taskId" class="flex items-center gap-3 text-[11px] py-1 text-gray-300">
+        <span class="w-8 text-brand">{{ task.direction === 'push' ? '上传' : '下载' }}</span>
+        <span class="flex-1 truncate" :title="task.localPath">{{ task.localPath.split(/[\\/]/).pop() }}</span>
+        <span :class="task.status === 'failed' ? 'text-red-400' : 'text-gray-500'" :title="task.error">
+          {{ { pending: '等待中', transferring: '传输中', completed: '已完成', failed: '失败', canceled: '已取消' }[task.status] }}
+          <template v-if="task.status === 'transferring' && task.totalBytes">{{ Math.round(task.transferredBytes / task.totalBytes * 100) }}%</template>
+        </span>
+        <button v-if="task.status === 'pending' || task.status === 'transferring'" class="text-gray-500 hover:text-white" @click="fileStore.cancelTransfer(task.taskId)">取消</button>
+        <button v-if="task.status === 'failed' || task.status === 'canceled'" class="text-gray-500 hover:text-white" @click="fileStore.retryTransfer(task.taskId)">重试</button>
+      </div>
+    </div>
+
     <!-- File Table -->
     <div class="flex-1 overflow-y-auto bg-dark-900 relative">
       <div v-if="fileStore.isLoading" class="h-full flex items-center justify-center text-gray-400 gap-2">

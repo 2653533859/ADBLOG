@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import { readFile } from 'node:fs/promises'
+import { randomInt } from 'node:crypto'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { AdbServerClient } from '@yume-chan/adb'
@@ -18,10 +19,12 @@ const DEVICE_SERVER_PATH = '/data/local/tmp/adblog-scrcpy-server.jar'
 type VideoStream = Awaited<AdbScrcpyClient<AdbScrcpyOptionsLatest<true>>['videoStream']>
 
 export class ScrcpyService {
+  constructor(private readonly eventSerial: string | null = null, private readonly onEnded?: () => void) {}
   private client: AdbScrcpyClient<AdbScrcpyOptionsLatest<true>> | null = null
   private generation = 0
   private videoWidth = 0
   private videoHeight = 0
+  private lastDeviceClipboard = ''
 
   private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
     let timer: NodeJS.Timeout | null = null
@@ -41,6 +44,7 @@ export class ScrcpyService {
     Promise<{ success: boolean; message: string; codec?: number }> {
     await this.stopStream()
     const generation = ++this.generation
+    this.lastDeviceClipboard = ''
     let client: AdbScrcpyClient<AdbScrcpyOptionsLatest<true>> | null = null
     try {
       const serverPath = this.findServerPath()
@@ -54,16 +58,19 @@ export class ScrcpyService {
       })
       await AdbScrcpyClient.pushServer(adb, serverStream, DEVICE_SERVER_PATH)
 
-      const scrcpyOptions = new AdbScrcpyOptionsLatest({
-        video: true, audio: false, control: true, videoCodec: 'h264',
-        maxSize: options.maxSize, maxFps: options.maxFps,
-        videoBitRate: options.bitRate, stayAwake: options.stayAwake,
-        sendDeviceMeta: false, sendFrameMeta: true
-      })
       let video: VideoStream | undefined
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         let pendingClient: ReturnType<typeof AdbScrcpyClient.start> | null = null
         try {
+          // The default socket name "scrcpy" can still be owned by another mirror.
+          // A new scid also prevents a failed prior attempt from blocking retry.
+          const scrcpyOptions = new AdbScrcpyOptionsLatest({
+            scid: randomInt(0x80000000).toString(16),
+            video: true, audio: false, control: true, videoCodec: 'h264',
+            maxSize: options.maxSize, maxFps: options.maxFps,
+            videoBitRate: options.bitRate, stayAwake: options.stayAwake,
+            sendDeviceMeta: false, sendFrameMeta: true
+          })
           pendingClient = AdbScrcpyClient.start(adb, DEVICE_SERVER_PATH, scrcpyOptions)
           client = await this.withTimeout(
             pendingClient,
@@ -106,6 +113,7 @@ export class ScrcpyService {
       })
       if (options.turnScreenOff) await client.controller?.setScreenPowerMode(0)
       void this.forwardVideo(video, client, generation, window)
+      if (client.clipboard) void this.forwardClipboard(client.clipboard, generation)
       void client.exited.then(() => {
         if (generation === this.generation) this.finish(window, '设备投屏连接已结束。')
       })
@@ -119,6 +127,29 @@ export class ScrcpyService {
       }
       return { success: false, message: this.formatError(error) }
     }
+  }
+
+  private async forwardClipboard(stream: NonNullable<AdbScrcpyClient<AdbScrcpyOptionsLatest<true>>['clipboard']>, generation: number): Promise<void> {
+    const reader = stream.getReader()
+    try {
+      while (generation === this.generation) {
+        const { done, value } = await reader.read()
+        if (done) break
+        this.lastDeviceClipboard = value
+      }
+    } catch { /* clipboard channel closes with the stream */ }
+    finally { reader.releaseLock() }
+  }
+
+  public async writeDeviceClipboard(value: string): Promise<void> {
+    if (!this.client?.controller) throw new Error('请先开始投屏。')
+    if (value.length > 100_000) throw new Error('剪贴板文本过长。')
+    await this.client.controller.setClipboard({ sequence: BigInt(Date.now()), paste: false, content: value })
+  }
+
+  public readDeviceClipboard(): string {
+    if (!this.client) throw new Error('请先开始投屏。')
+    return this.lastDeviceClipboard
   }
 
   private async forwardVideo(video: VideoStream,
@@ -209,10 +240,13 @@ export class ScrcpyService {
     this.videoWidth = 0
     this.videoHeight = 0
     this.send(window, 'scrcpy-stopped', message)
+    this.onEnded?.()
   }
 
   private send(window: BrowserWindow, channel: string, value: unknown): void {
-    if (!window.isDestroyed()) window.webContents.send(channel, value)
+    if (window.isDestroyed()) return
+    if (this.eventSerial) window.webContents.send(`multi-${channel}`, { serial: this.eventSerial, value })
+    else window.webContents.send(channel, value)
   }
 
   private findServerPath(): string | null {

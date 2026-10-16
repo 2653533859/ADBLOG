@@ -122,7 +122,22 @@ export class AdbService {
     }
   }
 
+  public async pair(ip: string, port: number, code: string): Promise<{ success: boolean; message: string }> {
+    if (!ip.trim() || !Number.isInteger(port) || port < 1 || port > 65535 || !/^\d{6}$/.test(code)) {
+      return { success: false, message: '请输入配对地址、有效端口和手机显示的 6 位配对码。' }
+    }
+    try {
+      const out = await this.exec(['pair', `${ip.trim()}:${port}`, code], 15_000)
+      return { success: /successfully paired/i.test(out), message: out }
+    } catch (err: unknown) {
+      return { success: false, message: err instanceof Error ? err.message : '配对失败' }
+    }
+  }
+
   public async disconnect(serial: string): Promise<{ success: boolean; message: string }> {
+    if (!serial.includes(':')) {
+      return { success: false, message: 'USB 设备请直接拔线，或在设备上关闭 USB 调试' }
+    }
     try {
       const out = await this.exec(['disconnect', serial], 5000)
       return { success: true, message: out }

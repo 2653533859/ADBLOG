@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { DeviceItem, DeviceDetailInfo, AppItem, ScanResult } from '../types'
 
+let deviceFetchQueue: Promise<void> = Promise.resolve()
+
 export const useDeviceStore = defineStore('device', {
   state: () => ({
     devices: [] as DeviceItem[],
@@ -11,6 +13,7 @@ export const useDeviceStore = defineStore('device', {
     selectedPid: null as number | null,
     selectedPids: [] as number[],
     isScanning: false,
+    isFetchingDevices: false,
     scanResults: [] as ScanResult[],
     isLoadingApps: false,
     isLoadingInfo: false
@@ -29,17 +32,26 @@ export const useDeviceStore = defineStore('device', {
   actions: {
     async fetchDevices(): Promise<void> {
       if (!window.electronAPI) return
-      this.devices = await window.electronAPI.getDevices()
-      if (this.devices.length > 0 && !this.devices.some(d => d.serial === this.selectedSerial)) {
-        await this.selectDevice(this.devices[0].serial)
-      } else if (this.devices.length === 0) {
-        this.selectedPackage = null
-        this.selectedPid = null
-        this.selectedPids = []
-        this.selectedSerial = null
-        this.deviceInfo = null
-        this.apps = []
-      }
+      const task = deviceFetchQueue.then(async () => {
+        this.isFetchingDevices = true
+        try {
+          this.devices = await window.electronAPI.getDevices()
+          if (this.devices.length > 0 && !this.devices.some(d => d.serial === this.selectedSerial)) {
+            await this.selectDevice(this.devices[0].serial)
+          } else if (this.devices.length === 0) {
+            this.selectedPackage = null
+            this.selectedPid = null
+            this.selectedPids = []
+            this.selectedSerial = null
+            this.deviceInfo = null
+            this.apps = []
+          }
+        } finally {
+          this.isFetchingDevices = false
+        }
+      })
+      deviceFetchQueue = task.catch(() => {})
+      return task
     },
 
     async selectDevice(serial: string): Promise<void> {
@@ -103,6 +115,11 @@ export const useDeviceStore = defineStore('device', {
         await this.selectDevice(targetSerial)
       }
       return res
+    },
+
+    async pair(ip: string, port: number, code: string): Promise<{ success: boolean; message: string }> {
+      if (!window.electronAPI) return { success: false, message: 'Electron API unavailable' }
+      return window.electronAPI.pairDevice(ip, port, code)
     },
 
     async disconnect(serial: string): Promise<{ success: boolean; message: string }> {

@@ -24,7 +24,7 @@
           >
             <option value="" disabled>选择 Android 设备</option>
             <option v-for="dev in deviceStore.devices" :key="dev.serial" :value="dev.serial">
-              {{ dev.model || dev.serial }} ({{ dev.serial }})
+              {{ dev.connectionType === 'usb' ? 'USB' : 'Wi-Fi' }} · {{ dev.model || dev.serial }} ({{ dev.serial }})
             </option>
           </select>
           <ChevronDown class="w-3.5 h-3.5 text-gray-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -41,20 +41,12 @@
         </div>
 
         <button
-          v-if="deviceStore.selectedDevice"
+          v-if="deviceStore.selectedDevice?.connectionType === 'wifi'"
           @click="disconnectCurrent"
           title="断开连接"
           class="p-2 text-gray-500 hover:text-red-400 hover:bg-dark-800 rounded-md"
         >
           <Unplug class="w-3.5 h-3.5" />
-        </button>
-
-        <button
-          @click="deviceStore.fetchDevices"
-          title="刷新设备列表"
-          class="p-2 text-gray-500 hover:text-white hover:bg-dark-800 rounded-md"
-        >
-          <RefreshCw class="w-3.5 h-3.5" />
         </button>
       </div>
     </div>
@@ -89,6 +81,16 @@
     <!-- Right: Quick Connect Actions -->
     <div class="flex items-center gap-2">
       <button
+        @click="deviceStore.fetchDevices"
+        :disabled="deviceStore.isFetchingDevices"
+        title="通过 USB 连接手机并开启 USB 调试后，点击检测"
+        class="flex items-center gap-1.5 px-3 py-2 bg-transparent hover:bg-dark-800 border border-dark-700 rounded-md text-xs font-medium text-gray-300 disabled:opacity-50"
+      >
+        <Usb class="w-3.5 h-3.5 text-brand" />
+        <span>{{ deviceStore.isFetchingDevices ? '检测中...' : '检测有线设备' }}</span>
+      </button>
+
+      <button
         @click="showScanModal = true"
         class="flex items-center gap-1.5 px-3 py-2 bg-transparent hover:bg-dark-800 border border-dark-700 rounded-md text-xs font-medium text-gray-300"
       >
@@ -113,7 +115,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { ChevronDown, RefreshCw, Unplug, Package, Wifi, Plus } from 'lucide-vue-next'
+import { ChevronDown, Unplug, Package, Wifi, Plus, Usb } from 'lucide-vue-next'
 import { useDeviceStore } from '../../stores/device'
 import ConnectModal from '../modals/ConnectModal.vue'
 import ScanModal from '../modals/ScanModal.vue'

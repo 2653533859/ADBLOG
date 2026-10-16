@@ -1,7 +1,7 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard, shell } from 'electron'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
-import { writeFile } from 'fs/promises'
+import { readFile, stat, writeFile } from 'fs/promises'
 import { existsSync } from 'fs'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -16,7 +16,11 @@ import { fileService } from './services/file-service'
 import { terminalService } from './services/terminal-service'
 import { perfService } from './services/perf-service'
 import { scrcpyService } from './services/scrcpy-service'
-import { LogcatFilterOptions, ScrcpyControlEvent, ScrcpyOptions } from '../src/types'
+import { multiDeviceService } from './services/multi-device-service'
+import { videoRecordingService } from './services/video-recording-service'
+import { diagnosticService, DiagnosticBundleOptions } from './services/diagnostic-service'
+import { traceService } from './services/trace-service'
+import { FileTransferTask, LogcatFilterOptions, ScrcpyControlEvent, ScrcpyOptions } from '../src/types'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -82,11 +86,28 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
   }
+  let closingForRecordingCleanup = false
+  let recordingCleanupFinished = false
+  const closingWindow = mainWindow
+  mainWindow.on('close', event => {
+    if (recordingCleanupFinished) return
+    if (closingForRecordingCleanup) { event.preventDefault(); return }
+    if (!videoRecordingService.hasActiveSessions()) return
+    event.preventDefault()
+    closingForRecordingCleanup = true
+    void videoRecordingService.abortAll().catch(error => {
+      console.error('[VideoRecordingService] Failed to clean up recordings before window close:', error)
+    }).finally(() => {
+      recordingCleanupFinished = true
+      closingWindow.close()
+    })
+  })
   mainWindow.on('closed', () => {
     mainWindow = null
     logcatService.stop()
     perfService.stop()
     scrcpyService.stopStream()
+    multiDeviceService.stopAll()
     terminalService.closeAll()
   })
 }
@@ -107,11 +128,28 @@ app.on('window-all-closed', () => {
   }
 })
 
+let quittingForRecordingCleanup = false
+let recordingCleanupBeforeQuitFinished = false
+app.on('before-quit', event => {
+  if (recordingCleanupBeforeQuitFinished) return
+  if (quittingForRecordingCleanup) { event.preventDefault(); return }
+  if (!videoRecordingService.hasActiveSessions()) return
+  event.preventDefault()
+  quittingForRecordingCleanup = true
+  void videoRecordingService.abortAll().catch(error => {
+    console.error('[VideoRecordingService] Failed to clean up recordings before app quit:', error)
+  }).finally(() => {
+    recordingCleanupBeforeQuitFinished = true
+    app.quit()
+  })
+})
+
 // === IPC Handlers ===
 
 // ADB & Device
 ipcMain.handle('adb:getDevices', () => adbService.getDevices())
 ipcMain.handle('adb:connect', (_e, ip: string, port?: number) => adbService.connect(ip, port))
+ipcMain.handle('adb:pair', (_e, ip: string, port: number, code: string) => adbService.pair(ip, port, code))
 ipcMain.handle('adb:disconnect', (_e, serial: string) => adbService.disconnect(serial))
 ipcMain.handle('adb:scanLan', (_e, port?: number, subnet?: string) => discoveryService.scanLan(port, subnet))
 ipcMain.handle('adb:getDeviceInfo', (_e, serial: string) => deviceInfoService.getDeviceInfo(serial))
@@ -138,6 +176,12 @@ ipcMain.handle('files:push', (_e, serial: string, localPath: string, remotePath:
 ipcMain.handle('files:pull', (_e, serial: string, remotePath: string, localPath: string) =>
   fileService.pullFile(serial, remotePath, localPath)
 )
+ipcMain.handle('files:transfer', (_e, task: FileTransferTask) => {
+  if (!mainWindow) return { success: false, message: '窗口已关闭' }
+  return fileService.transfer(task, mainWindow)
+})
+ipcMain.handle('files:cancelTransfer', (_e, taskId: string) => fileService.cancelTransfer(taskId))
+ipcMain.handle('file:stat', async (_e, filePath: string) => (await stat(filePath)).size)
 ipcMain.handle('files:mkdir', (_e, serial: string, remotePath: string) => fileService.createDirectory(serial, remotePath))
 ipcMain.handle('files:rm', (_e, serial: string, remotePath: string) => fileService.deleteFile(serial, remotePath))
 ipcMain.handle('files:rename', (_e, serial: string, oldPath: string, newPath: string) =>
@@ -167,11 +211,36 @@ ipcMain.handle('scrcpy:start', (_e, serial: string, options: ScrcpyOptions) => {
   return { success: false, message: 'No window' }
 })
 ipcMain.handle('scrcpy:stop', () => scrcpyService.stopStream())
+ipcMain.handle('multi:scrcpy:start', (_e, serial: string, options: ScrcpyOptions) =>
+  mainWindow ? multiDeviceService.startMirror(serial, options, mainWindow) : { success: false, message: '窗口已关闭。' })
+ipcMain.handle('multi:scrcpy:stop', (_e, serial: string) => multiDeviceService.stopMirror(serial))
+ipcMain.handle('multi:scrcpy:control', (_e, serial: string, event: ScrcpyControlEvent) => multiDeviceService.sendControl(serial, event))
+ipcMain.handle('multi:logcat:start', (_e, serial: string) => {
+  if (!mainWindow) throw new Error('窗口已关闭。')
+  multiDeviceService.startLogs(serial, mainWindow)
+})
+ipcMain.handle('multi:logcat:stop', (_e, serial: string) => multiDeviceService.stopLogs(serial))
+ipcMain.handle('multi:logcat:startRecording', (_e, serial: string, filePath: string) => multiDeviceService.startLogRecording(serial, filePath))
+ipcMain.handle('multi:logcat:stopRecording', (_e, serial: string) => multiDeviceService.stopLogRecording(serial))
 ipcMain.handle('scrcpy:control', (_e, event: ScrcpyControlEvent) => scrcpyService.sendControl(event))
 ipcMain.handle('scrcpy:screenshot', (_e, serial: string) => scrcpyService.captureSingleScreenshot(serial))
+ipcMain.handle('scrcpy:clipboardToDevice', () => scrcpyService.writeDeviceClipboard(clipboard.readText()))
+ipcMain.handle('scrcpy:clipboardToHost', () => {
+  const value = scrcpyService.readDeviceClipboard()
+  clipboard.writeText(value)
+  return value.length
+})
+ipcMain.handle('diagnostics:create', (_e, options: DiagnosticBundleOptions) => diagnosticService.createBundle(options))
+ipcMain.handle('recording:start', (_e, destination: string) => videoRecordingService.start(destination))
+ipcMain.handle('recording:append', (_e, id: string, bytes: Uint8Array) => videoRecordingService.append(id, bytes))
+ipcMain.handle('recording:finish', (_e, id: string) => videoRecordingService.finish(id))
+ipcMain.handle('recording:abort', (_e, id: string) => videoRecordingService.abort(id))
 
 ipcMain.handle('file:writeText', (_e, filePath: string, content: string) => writeFile(filePath, content, 'utf8'))
-
+ipcMain.handle('file:readText', async (_e, filePath: string) => {
+  if ((await stat(filePath)).size > 50 * 1024 * 1024) throw new Error('会话文件超过 50 MB。')
+  return readFile(filePath, 'utf8')
+})
 // Native Dialogs
 ipcMain.handle('dialog:saveFile', async (_e, defaultName: string) => {
   if (!mainWindow) return null
@@ -211,3 +280,8 @@ ipcMain.handle('dialog:openApk', async () => {
   })
   return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0]
 })
+
+ipcMain.handle('trace:capture', (_e, serial: string, destination: string, durationSeconds: number) =>
+  traceService.capture(serial, destination, durationSeconds))
+ipcMain.handle('trace:inspect', (_e, filePath: string) => traceService.inspect(filePath))
+ipcMain.handle('trace:openViewer', () => shell.openExternal('https://ui.perfetto.dev/'))

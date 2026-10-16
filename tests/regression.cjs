@@ -20,6 +20,27 @@ async function main() {
   assert.equal(calls[0].options.shell, undefined)
   await adb.exec(['-s','A','push','C:/My Photos/a.txt','/sdcard/My Photos/a.txt'])
   assert.equal(calls[1].args[3], 'C:/My Photos/a.txt')
+  const detectionAdb = new AdbService()
+  detectionAdb.exec = async args => {
+    if (args[0] === 'devices') return 'List of devices attached\nUSB123 device product:phone model:Pixel_9\n192.0.2.10:5555 device product:phone model:Pixel_9'
+    throw new Error(`Unexpected ADB command: ${args.join(' ')}`)
+  }
+  const detectedDevices = await detectionAdb.getDevices()
+  assert.deepEqual(Array.from(detectedDevices, d => [d.serial, d.connectionType]), [
+    ['USB123', 'usb'],
+    ['192.0.2.10:5555', 'wifi']
+  ])
+  const usbDisconnect = await detectionAdb.disconnect('USB123')
+  assert.equal(usbDisconnect.success, false)
+  assert.equal(calls.length, 2)
+  console.log('PASS mixed USB/Wi-Fi device discovery and USB disconnect guard')
+  let pairArgs
+  const pairingAdb = new AdbService()
+  pairingAdb.exec = async args => { pairArgs = Array.from(args); return 'Successfully paired to 192.0.2.10:37123' }
+  assert.equal((await pairingAdb.pair('192.0.2.10',37123,'123456')).success,true)
+  assert.deepEqual(pairArgs,['pair','192.0.2.10:37123','123456'])
+  assert.equal((await pairingAdb.pair('192.0.2.10',0,'123456')).success,false)
+  console.log('PASS Android wireless pairing arguments and validation')
   const { FileService } = load('electron/services/file-service.ts', {'./adb-service': {adbService: adb}})
   await new FileService().deleteFile('A', "/sdcard/My Photos/'quoted';$HOME")
   assert.equal(calls[2].args[3], `'rm' '-rf' '--' ${quoteRemoteArgument("/sdcard/My Photos/'quoted';$HOME")}`)
@@ -116,9 +137,10 @@ async function main() {
   console.log('PASS shared logcat scope counts, advanced filters and invalid regex')
 
   const streams = []
+  const streamOptions = []
   let restartCollector
   const { LogcatService } = load('electron/services/logcat-service.ts', {
-    fs: {createWriteStream: () => { const s = new EventEmitter(); s.end = () => {}; streams.push(s); return s }},
+    fs: {createWriteStream: (_path, options) => { const s = new EventEmitter(); s.end = () => {}; streams.push(s); streamOptions.push(options); return s }},
     './adb-service': {adbService:terminalAdb},
     '../../src/utils/logcat-filter': filterUtil
   }, {setTimeout: fn => {restartCollector = fn; return 99}, clearTimeout: () => {}})
@@ -143,6 +165,15 @@ async function main() {
   const opened = logs.startRecording('test.log'); streams[1].emit('open'); assert.equal(await opened,true)
   streams[1].emit('error',Error('disk full')); assert.equal(logs.isRecording,false)
   logs.stop()
+  const multiLogs = new LogcatService('USB-A', 5000); multiLogs.start('USB-A',win)
+  const multiOpen = multiLogs.startRecording('A.log', false)
+  streams[2].emit('open'); assert.equal(await multiOpen,true)
+  assert.equal(streamOptions[2].flags,'w')
+  streams[2].emit('error',Error('disk full'))
+  assert.equal(terminalSent.at(-1).channel,'multi-logcat-recording-error')
+  assert.equal(terminalSent.at(-1).data.serial,'USB-A')
+  assert.equal(terminalSent.at(-1).data.message,'disk full')
+  multiLogs.stop()
   console.log('PASS logcat restart deduplicates replay, drops stale output and recording failures')
 
   const timers = [], sent = [], collectors = []
@@ -163,6 +194,8 @@ async function main() {
   console.log('PASS monitoring restart rejects stale samples')
 
   let scrcpyInit, pushed = false, closed = false, startFactory = () => Promise.resolve(mockClient)
+  let nextScrcpyId = 0
+  const scrcpyIds = []
   const scrcpyTimers = []
   const mockClient = {
     videoStream: Promise.resolve({
@@ -178,13 +211,14 @@ async function main() {
   const { ScrcpyService } = load('electron/services/scrcpy-service.ts', {
     electron: {app: {getAppPath: () => process.cwd()}},
     'node:fs/promises': {readFile: async () => Buffer.from('server')},
+    'node:crypto': {randomInt: () => ++nextScrcpyId},
     'node:fs': {existsSync: () => true},
     'node:path': require('node:path'),
     fs: {existsSync: () => true},
     '@yume-chan/adb': {AdbServerClient: class {createAdb = async selector => ({selector})}},
     '@yume-chan/adb-server-node-tcp': {AdbServerNodeTcpConnector: class {}},
     '@yume-chan/adb-scrcpy': {
-      AdbScrcpyOptionsLatest: class {constructor(init) {scrcpyInit = init}},
+      AdbScrcpyOptionsLatest: class {constructor(init) {scrcpyInit = init; scrcpyIds.push(init.scid)}},
       AdbScrcpyClient: class {
         static pushServer = async () => {pushed = true}
         static start = () => startFactory()
@@ -208,12 +242,14 @@ async function main() {
   assert.equal(result.success,true); assert.equal(pushed,true)
   assert.equal(scrcpyInit.maxSize,1280); assert.equal(scrcpyInit.maxFps,30)
   assert.equal(scrcpyInit.videoBitRate,6000000); assert.equal(scrcpyInit.videoCodec,'h264')
+  assert.equal(scrcpyInit.scid,'1')
   await scrcpy.stopStream(); assert.equal(closed,true)
   closed = false
   mockClient.videoStream = Promise.reject(new Error('bad video metadata'))
   const failedScrcpy = new ScrcpyService()
   const failedResult = await failedScrcpy.startStream('device:5555',{maxSize:1280,maxFps:30,bitRate:6000000,stayAwake:true,turnScreenOff:false},win)
   assert.equal(failedResult.success,false); assert.equal(closed,true)
+  assert.deepEqual(scrcpyIds.slice(0,3), ['1','2','3'])
   console.log('PASS embedded scrcpy options, lifecycle and failed-start cleanup')
 
   let releaseLateClient, lateClosed = false, timedOutStarts = 0
@@ -255,7 +291,12 @@ async function main() {
     onRecordingError: () => () => {},
     onLogcatBatch: listener => {logcatListeners.add(listener); return () => logcatListeners.delete(listener)}
   }
-  const {useLogcatStore} = load('src/stores/logcat.ts',{'../utils/logcat-filter':filterUtil}, {
+  const {useLogcatStore} = load('src/stores/logcat.ts',{
+    '../utils/logcat-filter':filterUtil,
+    './incidents': { useIncidentStore: () => ({ ingest: () => [] }) },
+    './timeline': { useTimelineStore: () => ({ clearLiveBookmarks: () => {} }) },
+    './capture-rules': { useCaptureRulesStore: () => ({ handleBatch: async () => {} }) }
+  }, {
     window:{electronAPI:logcatApi}, setInterval: () => 1, clearInterval: () => {}
   })
   const logcatStore = useLogcatStore()

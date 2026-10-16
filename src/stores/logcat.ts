@@ -2,6 +2,9 @@ import { defineStore } from 'pinia'
 import { markRaw } from 'vue'
 import { LogcatEntry, LogcatFilterOptions, LogLevel } from '../types'
 import { filterLogcatEntries } from '../utils/logcat-filter'
+import { useIncidentStore } from './incidents'
+import { useTimelineStore } from './timeline'
+import { useCaptureRulesStore } from './capture-rules'
 
 // The main process owns one logcat stream. Keep its stop/start IPC calls in
 // order even when the selected device changes while a call is still pending.
@@ -56,6 +59,7 @@ export const useLogcatStore = defineStore('logcat', {
         await window.electronAPI.stopLogcat()
         if (generation !== this.streamGeneration) return
         this.currentSerial = serial
+        useTimelineStore().clearLiveBookmarks(serial)
         this.entries = []
         this.rateCounter = 0
         this.logRate = 0
@@ -70,6 +74,8 @@ export const useLogcatStore = defineStore('logcat', {
         // before the start IPC reply reaches the renderer.
         this.unsubscribe = window.electronAPI.onLogcatBatch((newEntries) => {
           if (generation !== this.streamGeneration) return
+          const incidents = useIncidentStore().ingest(serial, newEntries)
+          void useCaptureRulesStore().handleBatch(serial, newEntries, incidents)
           this.rateCounter += newEntries.length
           if (!this.isPaused) {
             // Log entries are immutable. Avoid creating thousands of deep Vue
